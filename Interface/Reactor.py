@@ -1,5 +1,5 @@
 """
-core/reactor.py — Ultron's reactor: a 3D shell of twisting glowing rings
+core/reactor.py — Orion's reactor: a 3D shell of twisting glowing rings
 round a white core, with orbit rings.
 
 It is rendered like a tiny software renderer, not drawn with lines:
@@ -73,7 +73,7 @@ def Approach(cur: float, target: float, rate: float, dt: float) -> float:
 
 
 def StateOf(name: str, speaking: bool, muted: bool) -> int:
-    """Ultron's UI state (and flags) as a reactor state."""
+    """Orion's UI state (and flags) as a reactor state."""
     if muted:
         return MUTED
     if speaking or name == "SPEAKING":
@@ -379,7 +379,7 @@ class Reactor:
 
 def MakeReactor() -> Reactor:
     """The main reactor when its file is here (it is kept out of git),
-    otherwise Ultron's own."""
+    otherwise Orion's own."""
     try:
         from Interface.ReactorCore import Reactor as CoreReactor
         return CoreReactor()

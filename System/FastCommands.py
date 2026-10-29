@@ -54,7 +54,7 @@ def Normalize(heard: str, names: tuple[str, ...] = ()) -> str:
     t = t.replace("’", "'").replace("%", " percent")
     t = re.sub(r"[^\w\s'+]", " ", t)
     t = re.sub(r"\s+", " ", t).strip()
-    # The assistant's own name, said first or last ("Ultron, mute").
+    # The assistant's own name, said first or last ("Orion, mute").
     for n in names:
         n = (n or "").lower().strip()
         if n:
@@ -328,7 +328,7 @@ def _Rule(heard: str, names: tuple[str, ...]) -> Optional[Match]:
     return None
 
 
-def Find(heard: str, names: tuple[str, ...] = ("ultron",)) -> Optional[Match]:
+def Find(heard: str, names: tuple[str, ...] = ("orion",)) -> Optional[Match]:
     """The command in `heard`, or None when it should go to the model."""
     rule = _Rule(heard, names)
     if rule is not None:

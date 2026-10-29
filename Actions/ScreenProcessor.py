@@ -1,5 +1,5 @@
 """
-Screen & webcam capture for ULTRON vision.
+Screen & webcam capture for ORION vision.
 
 Provides the two capture entry points Main.py uses — `_capture_screen()` and
 `_capture_camera()` — plus their helpers (compression, camera auto-detection,

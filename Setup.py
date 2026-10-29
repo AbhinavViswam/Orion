@@ -1,5 +1,5 @@
 """
-ULTRON V2 — one-time setup.
+ORION V2 — one-time setup.
 
 Installs the Python dependencies for THIS operating system only: the OS-specific
 packages in requirements.txt carry `sys_platform` markers, so a macOS or Linux
@@ -45,7 +45,7 @@ def CheckPython() -> None:
               f"{MAX_PY[0]}.{MAX_PY[1]} and run setup with that.")
         return
     if v < MIN_PY:
-        print(f"\n❌ Python {v[0]}.{v[1]} detected — ULTRON V2 needs at "
+        print(f"\n❌ Python {v[0]}.{v[1]} detected — ORION V2 needs at "
               f"least Python {MIN_PY[0]}.{MIN_PY[1]}.")
         print("   Install a supported version and run setup with it, e.g.:")
         print(f"     py -{MIN_PY[0]}.{MIN_PY[1]} setup.py        (Windows)")
@@ -54,7 +54,7 @@ def CheckPython() -> None:
 
 
 def main() -> None:
-    print(f"⚙  ULTRON V2 setup — detected OS: {OS or 'unknown'}, "
+    print(f"⚙  ORION V2 setup — detected OS: {OS or 'unknown'}, "
           f"Python {sys.version_info[0]}.{sys.version_info[1]}")
     CheckPython()
 

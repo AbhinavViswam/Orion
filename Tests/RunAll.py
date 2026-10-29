@@ -1,4 +1,4 @@
-"""Run every Ultron test.
+"""Run every Orion test.
 
     .venv\\Scripts\\python.exe -m Tests.RunAll            # unit tests
     .venv\\Scripts\\python.exe -m Tests.RunAll --all      # + the engine self-test (Engines._Tests)
@@ -22,7 +22,7 @@ PROTECTED = [ROOT / "Config" / "ApiKeys.json", ROOT / "Brain" / "LongTerm.json"]
 
 
 def Main() -> int:
-    # Ultron prints emoji; Main.py switches the console to UTF-8, so do the same.
+    # Orion prints emoji; Main.py switches the console to UTF-8, so do the same.
     for stream in (sys.stdout, sys.stderr):
         if hasattr(stream, "reconfigure"):
             stream.reconfigure(encoding="utf-8", errors="replace")

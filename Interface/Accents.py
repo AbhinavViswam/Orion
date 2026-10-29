@@ -1,5 +1,5 @@
 """
-Interface/Accents.py: the colours you can give Ultron, the same set as JARVIS
+Interface/Accents.py: the colours you can give Orion, the same set as JARVIS
 on the phone (jarvis-android ui/theme/Accent.kt and Living.kt).
 
 Three kinds:
@@ -23,7 +23,7 @@ GROUPS = (SOLID, GRADIENT, LIVING)
 
 # key, label, group, colour, second colour (gradients only)
 _TABLE = (
-    ("WHITE", "White", SOLID, "#dcefff", None),        # Ultron's original ice
+    ("WHITE", "White", SOLID, "#dcefff", None),        # Orion's original ice
     ("BLUE", "Blue", SOLID, "#29d8ff", None),
     ("PURPLE", "Violet", SOLID, "#a66bff", None),
     ("MAGENTA", "Magenta", SOLID, "#ff4fd8", None),

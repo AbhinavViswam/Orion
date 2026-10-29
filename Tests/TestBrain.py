@@ -68,8 +68,8 @@ class TestSettings(_TempFiles):
 
     def TestNamesRoundTrip(self):
         Settings.SaveApiKeys("k")
-        Settings.SaveAssistantConfig("ULTRON", "Abhi")
-        self.assertEqual(Settings.GetAssistantName(), "ULTRON")
+        Settings.SaveAssistantConfig("ORION", "Abhi")
+        self.assertEqual(Settings.GetAssistantName(), "ORION")
         self.assertEqual(Settings.GetUserName(), "Abhi")
 
     def TestSavingOtherSettingsKeepsTheKey(self):

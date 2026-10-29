@@ -1,7 +1,7 @@
 # Reactor maths ported from a Three.js scene to numpy so it runs without a web view.
 # Personal use only: keep this file out of anything shared.
 """
-core/reactor_core.py: Ultron's main reactor, drawn by the software renderer in core/reactor.py.
+core/reactor_core.py: Orion's main reactor, drawn by the software renderer in core/reactor.py.
 
 The scene:
   - a shell of 36 latitude courses whose lobes drift and curl over time
@@ -10,7 +10,7 @@ The scene:
   - a glass pearl core with a hot inner bead and a soft glow
   - 8 tilted orbit rings, each carrying two travelling nodes, and one wide faint ring
 
-It is white-ice instead of state colours (Ultron's
+It is white-ice instead of state colours (Orion's
 theme), and the voice pushes the shell's "charge" so talking visibly gathers it.
 """
 from __future__ import annotations

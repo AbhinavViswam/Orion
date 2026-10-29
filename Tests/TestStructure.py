@@ -44,7 +44,7 @@ class TestEveryModule(unittest.TestCase):
 
 
 def _ProjectModuleBindings(tree):
-    """Names bound to an Ultron module by `from Pkg import Mod` / `import X as Y`."""
+    """Names bound to an Orion module by `from Pkg import Mod` / `import X as Y`."""
     out = {}
     for n in ast.walk(tree):
         if isinstance(n, ast.ImportFrom) and n.level == 0 and n.module:
@@ -169,11 +169,11 @@ class TestSelfAttributes(unittest.TestCase):
 
 
 class TestLibraryContracts(unittest.TestCase):
-    """Ultron must call libraries by the names the libraries define."""
+    """Orion must call libraries by the names the libraries define."""
 
     def TestGeminiSessionCallsExist(self):
         """Every `self.session.X` in Main.py exists on Gemini's live session
-        AND on Ultron's own engine (which stands in for it)."""
+        AND on Orion's own engine (which stands in for it)."""
         from google.genai import live
         from Engines import Base, EnginePipeline
         session_cls = live.AsyncSession

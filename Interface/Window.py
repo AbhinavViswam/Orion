@@ -40,7 +40,7 @@ from PyQt6.QtGui import (
 # Video playback for the HUD. Part of PyQt6, so it costs no new dependency —
 # but the multimedia plugins are a separate piece of the Qt install and can be
 # absent on a stripped-down system, so a failure here disables one feature
-# rather than stopping ULTRON from starting.
+# rather than stopping ORION from starting.
 try:
     from PyQt6.QtMultimedia import QAudioOutput, QMediaPlayer
     from PyQt6.QtMultimediaWidgets import QGraphicsVideoItem
@@ -471,10 +471,10 @@ class _SysMetrics:
 _metrics = _SysMetrics()
 
 class HudCanvas(QWidget):
-    """The centre of the window: Ultron's reactor, the status line and the
+    """The centre of the window: Orion's reactor, the status line and the
     voice waveform."""
 
-    def __init__(self, assistant_name: str = "ULTRON", parent=None):
+    def __init__(self, assistant_name: str = "ORION", parent=None):
         super().__init__(parent)
         self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent)
         self.setMinimumSize(300, 300)
@@ -617,7 +617,7 @@ class HudCanvas(QWidget):
         self._tick += 1
         now = time.time()
 
-        # Ultron's own voice, from the schedule if one is playing (every frame
+        # Orion's own voice, from the schedule if one is playing (every frame
         # since the last tick, so short peaks are not skipped).
         sched = self._visemes
         if sched is not None:
@@ -772,7 +772,7 @@ class HudCanvas(QWidget):
         p.drawText(QRectF(0, sy, W, 22), Qt.AlignmentFlag.AlignCenter, txt)
 
         # waveform — reacts to the real audio level (mic while listening,
-        # ULTRON's own voice while speaking), a gentle ripple when quiet.
+        # ORION's own voice while speaking), a gentle ripple when quiet.
         wy = sy + 18
         N, bw = 36, 8
         wx0 = (W - N * bw) / 2
@@ -891,7 +891,7 @@ class LogWidget(QTextEdit):
         self._text    = ""
         self._pos     = 0
         self._tag     = "sys"
-        self._ai_name_lc = "ultron"   # updated when assistant name changes
+        self._ai_name_lc = "orion"   # updated when assistant name changes
         self._tmr = QTimer(self)
         self._tmr.timeout.connect(self.Step)
         self._sig.connect(self.Enqueue)
@@ -914,7 +914,7 @@ class LogWidget(QTextEdit):
         tl = self._text.lower()
         _ai_pfx = f"{self._ai_name_lc}:"
         if   tl.startswith("you:"):                              self._tag = "you"
-        elif tl.startswith(_ai_pfx) or tl.startswith("ultron:"): self._tag = "ai"
+        elif tl.startswith(_ai_pfx) or tl.startswith("orion:"): self._tag = "ai"
         elif tl.startswith("file:"):                             self._tag = "file"
         elif "err" in tl:                                        self._tag = "err"
         else:                                                    self._tag = "sys"
@@ -1051,7 +1051,7 @@ class FileDropZone(QWidget):
 
     def Browse(self):
         path, _ = QFileDialog.getOpenFileName(
-            self, "Select a file for ULTRON", str(Path.home()),
+            self, "Select a file for ORION", str(Path.home()),
             "All Files (*.*);;"
             "Images (*.jpg *.jpeg *.png *.gif *.webp *.bmp *.svg);;"
             "Documents (*.pdf *.docx *.txt *.md *.pptx);;"
@@ -1277,7 +1277,7 @@ class SetupOverlay(QWidget):
             return w
 
         layout.addWidget(Lbl("◈  INITIALISATION REQUIRED", 13, True))
-        layout.addWidget(Lbl("Configure ULTRON before first boot.", 9, color=C.PRI_DIM))
+        layout.addWidget(Lbl("Configure ORION before first boot.", 9, color=C.PRI_DIM))
         layout.addSpacing(6)
 
         sep = QFrame(); sep.setFrameShape(QFrame.Shape.HLine)
@@ -2525,7 +2525,7 @@ class ProvidersOverlay(_HudOverlay):
 
 
 class ClipboardPanel(QWidget):
-    """Floating panel shown when text is copied — offers quick Ultron actions."""
+    """Floating panel shown when text is copied — offers quick Orion actions."""
 
     action_requested = pyqtSignal(str)
     _W, _H = 326, 112
@@ -3246,7 +3246,7 @@ class VoicePage(QWidget):
     devices_changed = pyqtSignal()
     voice_changed = pyqtSignal()
 
-    def __init__(self, assistant_name: str = "ULTRON", parent=None):
+    def __init__(self, assistant_name: str = "ORION", parent=None):
         super().__init__(parent)
         from Voice.AudioDevices import DEFAULT_LABEL, ListDevices
         from Brain.Settings import (AVAILABLE_VOICES, GetInputDevice, GetOutputDevice,
@@ -3275,7 +3275,7 @@ class VoicePage(QWidget):
                 box.setCurrentIndex(box.count() - 1)
             return box
 
-        name = assistant_name or "ULTRON"
+        name = assistant_name or "ORION"
 
         # Microphone
         card, c = _Card()
@@ -3558,9 +3558,9 @@ class LookPage(QWidget):
 
         card, c = _Card()
         c.addWidget(_Caption("Names"))
-        self._saved_names = (cfg.get("assistant_name", "ULTRON") or "ULTRON", cfg.get("user_name", "") or "")
+        self._saved_names = (cfg.get("assistant_name", "ORION") or "ORION", cfg.get("user_name", "") or "")
         c.addWidget(_FieldLabel("Assistant name"))
-        self._name = _Input(self._saved_names[0], "ULTRON")
+        self._name = _Input(self._saved_names[0], "ORION")
         c.addWidget(self._name)
         c.addSpacing(2)
         c.addWidget(_FieldLabel("What it calls you"))
@@ -3592,7 +3592,7 @@ class LookPage(QWidget):
         self.RefreshSwatches()
 
     def SaveNames(self) -> None:
-        name = self._name.text().strip() or "ULTRON"
+        name = self._name.text().strip() or "ORION"
         user = self._user.text().strip()
         if (name, user) == self._saved_names:
             return
@@ -3639,7 +3639,7 @@ class MemoryPage(QWidget):
     """What the assistant remembers about you: search it, filter it, teach it
     something, and make it forget."""
 
-    def __init__(self, assistant_name: str = "ULTRON", parent=None):
+    def __init__(self, assistant_name: str = "ORION", parent=None):
         super().__init__(parent)
         self.setStyleSheet("background: transparent;")
         self._filter = ""
@@ -3843,7 +3843,7 @@ class PluginsPage(QWidget):
 
     changed = pyqtSignal()                   # a plugin was switched on or off
 
-    def __init__(self, plugins: list[dict], sections: list[dict], assistant_name: str = "ULTRON",
+    def __init__(self, plugins: list[dict], sections: list[dict], assistant_name: str = "ORION",
                  parent=None):
         super().__init__(parent)
         self.setStyleSheet("background: transparent;")
@@ -4236,7 +4236,7 @@ class MainWindow(QMainWindow):
 
         # Load customization from config
         _cfg = ReadFullConfig()
-        self._assistant_name: str = (_cfg.get("assistant_name") or "ULTRON").strip()
+        self._assistant_name: str = (_cfg.get("assistant_name") or "ORION").strip()
         _display = self._assistant_name.upper()
 
         # Apply the saved colour BEFORE panels/stylesheets are built.
@@ -4264,12 +4264,12 @@ class MainWindow(QMainWindow):
         )
 
         self.on_text_command   = None
-        self.on_interrupt      = None   # callable: () -> None — stop ULTRON mid-speech
+        self.on_interrupt      = None   # callable: () -> None — stop ORION mid-speech
         self.on_voice_change   = None   # callable: () -> None — rebuild session with new voice
         self.on_audio_device_change = None  # callable: () -> None — reopen audio streams
         self._confirm_overlay  = None   # live ConfirmBanner, if one is on screen
-        self.get_plugins       = None   # callable: () -> list[dict], set by UltronLive
-        self.get_plugin_settings = None # callable: () -> list[dict] settings schemas, set by UltronLive
+        self.get_plugins       = None   # callable: () -> list[dict], set by OrionLive
+        self.get_plugin_settings = None # callable: () -> list[dict] settings schemas, set by OrionLive
         self.on_push_to_talk   = None   # callable: (enable: bool) -> str scope
         self.ptt_hold          = None   # callable: (held: bool) -> None — windowed chord
         self._muted            = False
@@ -4338,7 +4338,7 @@ class MainWindow(QMainWindow):
         # inventing a second mechanism means the reactor, the camera and a video
         # can never be on screen at once.
         self._video_split = False        # is the sound a separate stream?
-        self._video_auto_muted = False   # did ULTRON close the mic, or the user?
+        self._video_auto_muted = False   # did ORION close the mic, or the user?
         # A plain flag rather than reading the widget. video_is_playing() is
         # called from plugin threads, and reading a widget's state from one is
         # not something to rely on; an attribute is.
@@ -4370,7 +4370,7 @@ class MainWindow(QMainWindow):
             return b
 
         # Muted is the default and the button says so, because a soundtrack
-        # talking over ULTRON is the one way this feature could make the
+        # talking over ORION is the one way this feature could make the
         # assistant worse rather than better.
         self._video_mute_btn = VidBtn("🔇  SOUND OFF")
         self._video_mute_btn.clicked.connect(self.ToggleVideoMute)
@@ -4689,7 +4689,7 @@ class MainWindow(QMainWindow):
     def SyncMicForVideo(self) -> None:
         """Close the microphone while the video is making sound.
 
-        ULTRON subtracts its OWN output from the microphone — that is what
+        ORION subtracts its OWN output from the microphone — that is what
         core/echo.py does — but a video plays through a different output
         entirely, so the guard has never heard of it and the assistant answers
         the film. There is no arrangement in which an open microphone and a
@@ -4697,7 +4697,7 @@ class MainWindow(QMainWindow):
 
         So the microphone closes for exactly as long as the sound is on, and
         opens again by itself the moment it goes off or the video is closed.
-        Only if ULTRON closed it: a microphone the user muted themselves stays
+        Only if ORION closed it: a microphone the user muted themselves stays
         muted, and pressing the mute key during a video hands the decision back
         to them for good.
         """
@@ -4760,9 +4760,9 @@ class MainWindow(QMainWindow):
     # Icon generation — arc-reactor style, rendered with Pillow
     # ------------------------------------------------------------------
     @staticmethod
-    def BuildUltronIcon(out_path: Path) -> bool:
+    def BuildOrionIcon(out_path: Path) -> bool:
         """
-        Render a ULTRON arc-reactor icon at 4× resolution and downsample
+        Render a ORION arc-reactor icon at 4× resolution and downsample
         for crisp results at all sizes. Saves a multi-res .ico to out_path.
         Returns True on success.
         """
@@ -4875,7 +4875,7 @@ class MainWindow(QMainWindow):
             sc.TargetPath       = target
             sc.Arguments        = f'"{args}"'
             sc.WorkingDirectory = work_dir
-            sc.Description      = "ULTRON AI Assistant"
+            sc.Description      = "ORION AI Assistant"
             sc.IconLocation     = icon_loc
             sc.save()
             return
@@ -4890,7 +4890,7 @@ class MainWindow(QMainWindow):
             f'sc.TargetPath = "{target}"',
             f'sc.Arguments = Chr(34) & "{args}" & Chr(34)',
             f'sc.WorkingDirectory = "{work_dir}"',
-            'sc.Description = "ULTRON AI Assistant"',
+            'sc.Description = "ORION AI Assistant"',
             f'sc.IconLocation = "{icon_loc}"',
             'sc.Save',
         ])
@@ -5002,9 +5002,9 @@ class MainWindow(QMainWindow):
         desktop = self.GetDesktopDir()
 
         # Arc-reactor icon (.ico — also exported as .png for Linux/macOS)
-        ico_path = Path(__file__).resolve().parent.parent / "Config" / "Ultron.ico"
+        ico_path = Path(__file__).resolve().parent.parent / "Config" / "Orion.ico"
         if not ico_path.exists():
-            self.BuildUltronIcon(ico_path)
+            self.BuildOrionIcon(ico_path)
 
         try:
             _os = platform.system()
@@ -5013,14 +5013,14 @@ class MainWindow(QMainWindow):
             if _os == "Windows":
                 pythonw  = python.parent / "pythonw.exe"
                 target   = str(pythonw if pythonw.exists() else python)
-                lnk      = str(desktop / "ULTRON.lnk")
+                lnk      = str(desktop / "ORION.lnk")
                 icon_loc = str(ico_path) if ico_path.exists() else f"{target},0"
                 self.CreateLnkWindows(lnk, target, str(script),
                                          str(script.parent), icon_loc)
 
             # ── macOS — proper .app bundle (no Terminal window) ───────────────
             elif _os == "Darwin":
-                app     = desktop / "ULTRON.app"
+                app     = desktop / "ORION.app"
                 mac_dir = app / "Contents" / "MacOS"
                 res_dir = app / "Contents" / "Resources"
                 mac_dir.mkdir(parents=True, exist_ok=True)
@@ -5028,7 +5028,7 @@ class MainWindow(QMainWindow):
 
                 # Launcher executable (bash — runs as background process,
                 # macOS does NOT open Terminal for executables inside .app bundles)
-                launcher = mac_dir / "ULTRON"
+                launcher = mac_dir / "ORION"
                 launcher.write_text(
                     "#!/usr/bin/env bash\n"
                     f'cd "{script.parent}"\n'
@@ -5043,10 +5043,10 @@ class MainWindow(QMainWindow):
                     '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" '
                     '"http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n'
                     '<plist version="1.0"><dict>\n'
-                    '  <key>CFBundleExecutable</key><string>ULTRON</string>\n'
+                    '  <key>CFBundleExecutable</key><string>ORION</string>\n'
                     '  <key>CFBundleIdentifier</key>'
-                    '<string>com.ultron.assistant</string>\n'
-                    '  <key>CFBundleName</key><string>ULTRON</string>\n'
+                    '<string>com.orion.assistant</string>\n'
+                    '  <key>CFBundleName</key><string>ORION</string>\n'
                     '  <key>CFBundlePackageType</key><string>APPL</string>\n'
                     '  <key>CFBundleVersion</key><string>1.0</string>\n'
                     '</dict></plist>\n'
@@ -5084,10 +5084,10 @@ class MainWindow(QMainWindow):
                         png_path = ico_path  # fallback to .ico
 
                 icon_line = f"Icon={png_path}\n" if png_path.exists() else ""
-                desk = desktop / "ULTRON.desktop"
+                desk = desktop / "ORION.desktop"
                 desk.write_text(
                     "[Desktop Entry]\n"
-                    "Name=ULTRON\n"
+                    "Name=ORION\n"
                     f"Exec={python} {script}\n"
                     f"Path={script.parent}\n"
                     "Type=Application\n"
@@ -5443,13 +5443,13 @@ class MainWindow(QMainWindow):
         """The last exchange, shown softly under the reactor."""
         t = (text or "").strip()
         low = t.lower()
-        name = (self._assistant_name or "ultron").lower()
+        name = (self._assistant_name or "orion").lower()
         try:
             if low.startswith("you:"):
                 self.hud.SetCaption("you", t[4:].strip())
             elif low.startswith(name + ":"):
                 self.hud.SetCaption("ai", t[len(name) + 1:].strip())
-            elif low.startswith("ultron:"):
+            elif low.startswith("orion:"):
                 self.hud.SetCaption("ai", t[7:].strip())
         except Exception:
             pass
@@ -5604,7 +5604,7 @@ class MainWindow(QMainWindow):
     # while translating the tag would mean a table per language, which is worse.
     # A shape carries it in every language, and shape plus colour still reads
     # for someone who cannot separate red from amber. What the marks mean
-    # arrives the way everything else does: ULTRON says it out loud.
+    # arrives the way everything else does: ORION says it out loud.
     _REVIEW_MARKS = {"serious": ("RED", "▲"), "caution": ("ACC2", "●"), "note": ("PRI_DIM", "·")}
 
     @staticmethod
@@ -5678,7 +5678,7 @@ class MainWindow(QMainWindow):
     # An interactive twin of the content panel. The plugin only ever hands over
     # questions; everything about asking, marking and reporting happens here,
     # and the finished result is pushed back into the conversation the same way
-    # a dropped file is — as a message ULTRON reads and responds to. That keeps
+    # a dropped file is — as a message ORION reads and responds to. That keeps
     # the tool call short (it returns the moment the board is up) and leaves the
     # talking to the assistant, in the user's own language.
 
@@ -5884,7 +5884,7 @@ class MainWindow(QMainWindow):
         elif verdict is False:
             mark, colour = "✕  " + str(q.get("answer", "")), C.RED
         else:
-            # Open answers and near-miss gap-fills are ULTRON's to judge. Saying
+            # Open answers and near-miss gap-fills are ORION's to judge. Saying
             # so is honest; marking it wrong here would be a guess.
             mark, colour = "…  noted — I'll go over this one with you", C.ACC2
         note = q.get("note") or ""
@@ -5919,7 +5919,7 @@ class MainWindow(QMainWindow):
 
         self._log.AppendLog(f"QUIZ: {topic or 'quiz'} — {right}/{total} correct")
 
-        # Hand it back to ULTRON as a message, not as a tool return: the tool
+        # Hand it back to ORION as a message, not as a tool return: the tool
         # call ended minutes ago. This is the same channel a dropped file uses.
         lines = [f"[QUIZ_DONE] topic={topic or 'general'} | "
                  f"auto-marked {right}/{total} correct"
@@ -5986,7 +5986,7 @@ class MainWindow(QMainWindow):
                 key = winreg.OpenKey(winreg.HKEY_CURRENT_USER,
                     r"Software\Microsoft\Windows\CurrentVersion\Run", 0, winreg.KEY_READ)
                 try:
-                    winreg.QueryValueEx(key, "ULTRON_AI")
+                    winreg.QueryValueEx(key, "ORION_AI")
                     return True
                 except FileNotFoundError:
                     return False
@@ -5994,9 +5994,9 @@ class MainWindow(QMainWindow):
                     winreg.CloseKey(key)
             elif _OS == "Darwin":
                 return (Path.home() / "Library" / "LaunchAgents"
-                        / "com.ultron.assistant.plist").exists()
+                        / "com.orion.assistant.plist").exists()
             else:
-                return (Path.home() / ".config" / "autostart" / "ultron.desktop").exists()
+                return (Path.home() / ".config" / "autostart" / "orion.desktop").exists()
         except Exception:
             return False
 
@@ -6009,17 +6009,17 @@ class MainWindow(QMainWindow):
                 reg = winreg.OpenKey(winreg.HKEY_CURRENT_USER,
                     r"Software\Microsoft\Windows\CurrentVersion\Run", 0, winreg.KEY_ALL_ACCESS)
                 if currently_on:
-                    winreg.DeleteValue(reg, "ULTRON_AI")
+                    winreg.DeleteValue(reg, "ORION_AI")
                 else:
                     pythonw = Path(sys.executable).parent / "pythonw.exe"
                     exe = str(pythonw if pythonw.exists() else sys.executable)
-                    winreg.SetValueEx(reg, "ULTRON_AI", 0, winreg.REG_SZ,
+                    winreg.SetValueEx(reg, "ORION_AI", 0, winreg.REG_SZ,
                                       f'"{exe}" "{script}"')
                 winreg.CloseKey(reg)
             elif _OS == "Darwin":
                 plist_dir = Path.home() / "Library" / "LaunchAgents"
                 plist_dir.mkdir(parents=True, exist_ok=True)
-                plist = plist_dir / "com.ultron.assistant.plist"
+                plist = plist_dir / "com.orion.assistant.plist"
                 if currently_on:
                     plist.unlink(missing_ok=True)
                 else:
@@ -6028,7 +6028,7 @@ class MainWindow(QMainWindow):
                         '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" '
                         '"http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n'
                         '<plist version="1.0"><dict>\n'
-                        '  <key>Label</key><string>com.ultron.assistant</string>\n'
+                        '  <key>Label</key><string>com.orion.assistant</string>\n'
                         '  <key>ProgramArguments</key><array>\n'
                         f'    <string>{sys.executable}</string>\n'
                         f'    <string>{script}</string>\n'
@@ -6039,7 +6039,7 @@ class MainWindow(QMainWindow):
             else:
                 desk_dir = Path.home() / ".config" / "autostart"
                 desk_dir.mkdir(parents=True, exist_ok=True)
-                desk = desk_dir / "ultron.desktop"
+                desk = desk_dir / "orion.desktop"
                 if currently_on:
                     desk.unlink(missing_ok=True)
                 else:
@@ -6130,7 +6130,7 @@ class MainWindow(QMainWindow):
     def ApplyNameUpdate(self, name: str, user_name: str, ui_color: str = "",
                            voice: str = ""):
         """Update all name/theme-dependent UI elements and persist to config."""
-        self._assistant_name = name.strip() or "ULTRON"
+        self._assistant_name = name.strip() or "ORION"
         display = self._assistant_name.upper()
         self.setWindowTitle(f"{display} — {APP_VERSION}")
         self._title_lbl.setText(display)
@@ -6627,7 +6627,7 @@ class MainWindow(QMainWindow):
             self._overlay.hide()
             self._overlay = None
         self.ApplyState("LISTENING")
-        self._assistant_name = ReadFullConfig().get("assistant_name", "ULTRON") or "ULTRON"
+        self._assistant_name = ReadFullConfig().get("assistant_name", "ORION") or "ORION"
         self._log.AppendLog(f"SYS: Initialised. OS={os_name.upper()}. {self._assistant_name} online.")
 
 
@@ -6640,10 +6640,20 @@ class _RootShim:
         pass
 
 
-class UltronUI:
+class OrionUI:
     def __init__(self, size=None):
+        if sys.platform == "win32":
+            # Its own taskbar identity, so Windows shows Orion's icon, not Python's.
+            try:
+                import ctypes
+                ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("Orion.Assistant")
+            except Exception:
+                pass
         self._app = QApplication.instance() or QApplication(sys.argv)
         self._app.setStyle("Fusion")
+        ico = Path(__file__).resolve().parent.parent / "Config" / "Orion.ico"
+        if ico.exists():
+            self._app.setWindowIcon(QIcon(str(ico)))
         self._win = MainWindow()
         self.root = _RootShim(self._app)
         self._win.show()
@@ -6745,7 +6755,7 @@ class UltronUI:
 
     def PushVisemes(self, frames, hop: float, at: float) -> None:
         """Thread-safe: post a schedule of 20 ms voice-level frames for
-        ULTRON's own speech, so the reactor moves in step with the audio. `at` is the wall-clock time the batch begins to
+        ORION's own speech, so the reactor moves in step with the audio. `at` is the wall-clock time the batch begins to
         sound, not the time of the call. See HudCanvas.push_visemes()."""
         try:
             self._win.hud.PushVisemes(frames, hop, at)
@@ -6771,7 +6781,7 @@ class UltronUI:
 
         `grade(question, given)` decides each answer — the plugin supplies it so
         the marking rules live with the questions rather than being duplicated
-        here. Returning None from it means "ULTRON should judge this one", which
+        here. Returning None from it means "ORION should judge this one", which
         is how open answers and near-miss gap-fills are handled.
 
         Returns immediately: the user answers at their own pace and the finished
@@ -6812,7 +6822,7 @@ class UltronUI:
         together and kept in step.
 
         Muted by default, and that is a decision rather than a default: a
-        soundtrack talking over ULTRON is the one way this could make the
+        soundtrack talking over ORION is the one way this could make the
         assistant worse. The user turns sound on from the header button or by
         asking, and closes it the same two ways.
         """
@@ -6824,7 +6834,7 @@ class UltronUI:
         self._win._video_close_sig.emit()
 
     def SetMicMuted(self, muted: bool, note: str = "") -> None:
-        """Thread-safe: turn Ultron's own microphone off or on (the call
+        """Thread-safe: turn Orion's own microphone off or on (the call
         secretary closes it while it is on a call)."""
         self._win._mic_mute_sig.emit(bool(muted), str(note or ""))
 

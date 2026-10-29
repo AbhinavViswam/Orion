@@ -1,5 +1,5 @@
 """
-System/SkillForge.py: Ultron writing itself a new skill when you ask for one.
+System/SkillForge.py: Orion writing itself a new skill when you ask for one.
 
 "Make yourself a skill that tells me the price of bitcoin" becomes a new
 plugin in Plugins/, in the same shape as every other plugin (a PLUGIN dict and
@@ -7,9 +7,9 @@ a run() function), so Settings › Plugins lists it with a switch like the rest.
 
   1. Draft: the model writes the plugin and an example call.
   2. Safety scan, before anything runs: it may not run programs, delete
-     files, change the registry, load code at run time or read Ultron's keys
+     files, change the registry, load code at run time or read Orion's keys
      and memory, and it may only import packages that are already installed
-     (nothing is pip-installed for it). From Ultron itself it may only use
+     (nothing is pip-installed for it). From Orion itself it may only use
      Brain.Gemini, the shared model client.
   3. Test run: the example call runs in a separate Python process with a
      time limit. It has to return an answer, not crash.
@@ -125,7 +125,7 @@ def ScanCode(code: str, name: str = "") -> Scan:
                 out.problems.append(f"it imports {top}, which skills may not use")
             elif IsFirstParty(top, PLUGINS_DIR):
                 if m not in _FIRST_PARTY_OK:
-                    out.problems.append(f"it imports {m} from Ultron itself (only Brain.Gemini is allowed)")
+                    out.problems.append(f"it imports {m} from Orion itself (only Brain.Gemini is allowed)")
             elif not _Installed(top):
                 out.problems.append(f"it needs {top}, which isn't installed")
             if top in _NETWORK:
@@ -247,7 +247,7 @@ def LooksFailed(answer: str) -> bool:
 
 # ── drafting ────────────────────────────────────────────────────────────────
 
-_PROMPT = """You write plugins for Ultron, a Python 3 desktop assistant on Windows. Write one for:
+_PROMPT = """You write plugins for Orion, a Python 3 desktop assistant on Windows. Write one for:
 {goal}
 {name_line}
 A plugin is ONE Python file:
@@ -263,7 +263,7 @@ Rules:
   use free public endpoints that need none, with timeout=10.
 - To ask an AI model something: `from Brain import Gemini` then `Gemini.text(prompt, tier=Gemini.FAST)`.
 - Never run programs, delete or move files, edit the registry, use eval/exec, or read anything in
-  Ultron's Config folder.
+  Orion's Config folder.
 Reply with ONLY this JSON:
 {{"name": "<snake_case>", "code": "<the whole file>", "example": {{<parameters for one test call>}},
   "summary": "<one plain sentence: what the skill does>"}}
@@ -406,7 +406,7 @@ def Remove(name: str, registry, after: Callable[[], None] = lambda: None) -> str
 TOOL = {
     "name": "skill_forge",
     "description": (
-        "Builds Ultron a NEW SKILL (a plugin) when the user asks you to make, create, build or add "
+        "Builds Orion a NEW SKILL (a plugin) when the user asks you to make, create, build or add "
         "a skill, feature or ability you don't have: 'make yourself a skill that tells me the "
         "bitcoin price'. 'forge' writes it, safety-checks it, test-runs it and puts it on screen "
         "for the user to confirm; nothing is added without that. 'list' names the forged skills; "

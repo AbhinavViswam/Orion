@@ -36,7 +36,7 @@ class TestMainWiring(unittest.TestCase):
         self.assertEqual(self.Main.API_CONFIG_PATH, ROOT / "Config" / "ApiKeys.json")
 
     def TestUiCallbacksPointAtRealMethods(self):
-        """`self.ui.on_x = self.Y` in Main.py: Y must be a method of UltronLive."""
+        """`self.ui.on_x = self.Y` in Main.py: Y must be a method of OrionLive."""
         missing = []
         for n in ast.walk(Tree(ROOT / "Main.py")):
             if isinstance(n, ast.Assign) and len(n.targets) == 1:
@@ -44,18 +44,18 @@ class TestMainWiring(unittest.TestCase):
                 if isinstance(t, ast.Attribute) and isinstance(t.value, ast.Attribute) \
                         and t.value.attr == "ui" and isinstance(v, ast.Attribute) \
                         and isinstance(v.value, ast.Name) and v.value.id == "self":
-                    if not hasattr(self.Main.UltronLive, v.attr):
+                    if not hasattr(self.Main.OrionLive, v.attr):
                         missing.append(v.attr)
         self.assertEqual(missing, [])
 
     def TestUiHasWhatMainCalls(self):
-        """Every `self.ui.X(...)` Main.py calls exists on UltronUI."""
-        from Interface.Window import UltronUI
+        """Every `self.ui.X(...)` Main.py calls exists on OrionUI."""
+        from Interface.Window import OrionUI
         missing = set()
         for n in ast.walk(Tree(ROOT / "Main.py")):
             if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) \
                     and isinstance(n.func.value, ast.Attribute) and n.func.value.attr == "ui":
-                if not hasattr(UltronUI, n.func.attr):
+                if not hasattr(OrionUI, n.func.attr):
                     missing.add(n.func.attr)
         self.assertEqual(sorted(missing), [])
 

@@ -23,7 +23,7 @@ def App():
 
 
 def SourceFiles():
-    """Every Ultron .py file (not the tests, not the venv)."""
+    """Every Orion .py file (not the tests, not the venv)."""
     files = [ROOT / "Main.py", ROOT / "Setup.py"]
     for d in CODE_DIRS:
         files += sorted((ROOT / d).rglob("*.py"))

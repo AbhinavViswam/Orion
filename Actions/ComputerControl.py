@@ -68,7 +68,7 @@ _SAFE_SCREENSHOT_ROOTS = (
 )
 
 def SafeScreenshotPath(requested: str | None) -> Path:
-    fallback = Path.home() / "Desktop" / "ultron_screenshot.png"
+    fallback = Path.home() / "Desktop" / "orion_screenshot.png"
     if not requested:
         return fallback
     try:
@@ -342,7 +342,7 @@ def CloseApp(app_name: str, confirmed_index: int | None = None) -> str:
         No target. It sent Alt+F4 to whatever window had focus, and while
         somebody is talking to the assistant the window with focus is very
         often the assistant — which is why people reported that asking it to
-        close an app closed ULTRON itself. It also returned nothing at all, so
+        close an app closed ORION itself. It also returned nothing at all, so
         the model announced a success it had no information about.
 
         The keystroke is not fixable by aiming it better. "The focused window"

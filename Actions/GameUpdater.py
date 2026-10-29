@@ -810,7 +810,7 @@ def ScheduleDailyUpdate(hour: int = 3, minute: int = 0) -> str:
 
 
 def ScheduleWindows(hour: int, minute: int) -> str:
-    task_name   = "ULTRON_GameUpdater"
+    task_name   = "ORION_GameUpdater"
     script_path = Path(__file__).resolve()
     subprocess.run(["schtasks", "/Delete", "/TN", task_name, "/F"], capture_output=True, **_CNW)
     for extra in (["/RL", "HIGHEST", "/RU", "SYSTEM"], []):
@@ -826,13 +826,13 @@ def ScheduleWindows(hour: int, minute: int) -> str:
 def ScheduleMac(hour: int, minute: int) -> str:
     plist_dir   = Path.home() / "Library" / "LaunchAgents"
     plist_dir.mkdir(parents=True, exist_ok=True)
-    plist_path  = plist_dir / "com.ultron.gameupdater.plist"
+    plist_path  = plist_dir / "com.orion.gameupdater.plist"
     script_path = Path(__file__).resolve()
     plist_content = f"""<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
   "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
-    <key>Label</key><string>com.ultron.gameupdater</string>
+    <key>Label</key><string>com.orion.gameupdater</string>
     <key>ProgramArguments</key>
     <array>
         <string>{sys.executable}</string>
@@ -860,7 +860,7 @@ def ScheduleMac(hour: int, minute: int) -> str:
 
 def ScheduleLinux(hour: int, minute: int) -> str:
     script_path = Path(__file__).resolve()
-    marker      = "# ULTRON_GameUpdater"
+    marker      = "# ORION_GameUpdater"
     cron_entry  = f"{minute} {hour} * * * {sys.executable} {script_path} --scheduled  {marker}"
     try:
         existing = subprocess.run(["crontab", "-l"], capture_output=True, text=True)
@@ -880,13 +880,13 @@ def ScheduleLinux(hour: int, minute: int) -> str:
 def CancelScheduledUpdate() -> str:
     if IsWindows():
         result = subprocess.run(
-            ["schtasks", "/Delete", "/TN", "ULTRON_GameUpdater", "/F"],
+            ["schtasks", "/Delete", "/TN", "ORION_GameUpdater", "/F"],
             capture_output=True, text=True, **_CNW
         )
         return ("Scheduled update cancelled."
                 if result.returncode == 0 else "No scheduled update found.")
     if IsMac():
-        plist_path = Path.home() / "Library" / "LaunchAgents" / "com.ultron.gameupdater.plist"
+        plist_path = Path.home() / "Library" / "LaunchAgents" / "com.orion.gameupdater.plist"
         if plist_path.exists():
             subprocess.run(["launchctl", "unload", str(plist_path)], capture_output=True)
             plist_path.unlink()
@@ -896,7 +896,7 @@ def CancelScheduledUpdate() -> str:
     try:
         existing = subprocess.run(["crontab", "-l"], capture_output=True, text=True)
         lines    = [l for l in existing.stdout.splitlines()
-                    if "ULTRON_GameUpdater" not in l]
+                    if "ORION_GameUpdater" not in l]
         subprocess.run(["crontab", "-"],
                        input="\n".join(lines) + "\n", text=True)
         return "Scheduled update cancelled."
@@ -907,7 +907,7 @@ def CancelScheduledUpdate() -> str:
 def GetScheduleStatus() -> str:
     if IsWindows():
         result = subprocess.run(
-            ["schtasks", "/Query", "/TN", "ULTRON_GameUpdater", "/FO", "LIST"],
+            ["schtasks", "/Query", "/TN", "ORION_GameUpdater", "/FO", "LIST"],
             capture_output=True, text=True, **_CNW
         )
         if result.returncode != 0:
@@ -919,15 +919,15 @@ def GetScheduleStatus() -> str:
         return "Game update is scheduled."
     if IsMac():
         plist_path = (Path.home() / "Library" / "LaunchAgents"
-                      / "com.ultron.gameupdater.plist")
+                      / "com.orion.gameupdater.plist")
         return ("Game update is scheduled via launchd."
                 if plist_path.exists() else "No scheduled game update found.")
 
     try:
         result = subprocess.run(["crontab", "-l"], capture_output=True, text=True)
-        if "ULTRON_GameUpdater" in result.stdout:
+        if "ORION_GameUpdater" in result.stdout:
             for line in result.stdout.splitlines():
-                if "ULTRON_GameUpdater" in line:
+                if "ORION_GameUpdater" in line:
                     return f"Game update is scheduled: {line.split('#')[0].strip()}"
         return "No scheduled game update found."
     except Exception:

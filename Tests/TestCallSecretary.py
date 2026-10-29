@@ -14,7 +14,7 @@ from unittest import mock
 import Tests.Helpers  # noqa: F401  (paths)
 import Plugins.CallSecretary as CS
 
-CFG = {"greeting": "Hi, this is Ultron, an AI assistant.", "goodbye": "Goodbye.", "joining": "Joining.",
+CFG = {"greeting": "Hi, this is Orion, an AI assistant.", "goodbye": "Goodbye.", "joining": "Joining.",
        "listen_through": "Automatic", "max_seconds": 45, "transcribe": True, "keep_recordings": False,
        "owner": "Abhi"}
 
@@ -254,12 +254,12 @@ class TestPlugin(unittest.TestCase):
 
     def TestGreetingWithAndWithoutAName(self):
         with mock.patch("Brain.Settings.GetPluginConfig", lambda ns: {}), \
-                mock.patch("Brain.Settings.LoadApiKeys", lambda: {"assistant_name": "ULTRON"}):
+                mock.patch("Brain.Settings.LoadApiKeys", lambda: {"assistant_name": "ORION"}):
             with mock.patch("Brain.Settings.GetUserName", lambda: "Abhi"):
-                self.assertIn("Ultron, Abhi's AI assistant", CS.Settings()["greeting"])
+                self.assertIn("Orion, Abhi's AI assistant", CS.Settings()["greeting"])
             with mock.patch("Brain.Settings.GetUserName", lambda: ""):
                 cfg = CS.Settings()
-        self.assertIn("Ultron, an AI assistant", cfg["greeting"])
+        self.assertIn("Orion, an AI assistant", cfg["greeting"])
         self.assertNotIn("{", cfg["greeting"] + cfg["goodbye"])
         self.assertEqual(cfg["max_seconds"], 45)
 

@@ -46,7 +46,7 @@ def _log(message: str, player=None) -> None:
     print(f"[Weather] {message}")
     if player:
         try:
-            player.WriteLog(f"ULTRON: {message}")
+            player.WriteLog(f"ORION: {message}")
         except Exception:
             pass
 

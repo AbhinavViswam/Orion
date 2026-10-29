@@ -1,10 +1,10 @@
 """
-System/SelfRepair.py: Ultron fixing its own bugs, with you in charge.
+System/SelfRepair.py: Orion fixing its own bugs, with you in charge.
 
 When a tool crashes, the traceback is kept and the model is told it may OFFER
 a repair. Nothing is changed until you say so:
 
-  1. "fix yourself" (the `self_repair` tool) finds the first file of Ultron's
+  1. "fix yourself" (the `self_repair` tool) finds the first file of Orion's
      own in the traceback, and asks the model for the smallest change that
      stops that error (a None check, a missing key, a bad cast).
   2. The change is checked before anything is written: it must match the file
@@ -20,7 +20,7 @@ patches itself the moment something fails, without asking. Here a crash only
 ever produces an offer, and a few files can never be repaired at all, so a bad
 fix can't take away the very things that would undo it.
 
-A fix changes the file on disk; the running copy of Ultron keeps the old code
+A fix changes the file on disk; the running copy of Orion keeps the old code
 until it restarts.
 """
 from __future__ import annotations
@@ -76,7 +76,7 @@ def _Rel(path: Path) -> Optional[str]:
 
 
 def Locate(tb: str) -> Optional[Place]:
-    """The innermost frame in one of Ultron's own files that may be repaired."""
+    """The innermost frame in one of Orion's own files that may be repaired."""
     lines = [l.strip() for l in (tb or "").strip().splitlines() if l.strip()]
     error = lines[-1][:200] if lines else ""
     for raw, line, func in reversed(_FRAME.findall(tb or "")):
@@ -129,7 +129,7 @@ def NoteFailure(tool: str, tb: str) -> str:
         _last.update({"tool": tool, "traceback": tb or "", "at": time.time()})
     if place is None:
         return ""
-    return (f" (This is a bug in Ultron's own code, {place.rel} line {place.line}. You may offer, "
+    return (f" (This is a bug in Orion's own code, {place.rel} line {place.line}. You may offer, "
             f"in a few words, to repair it with self_repair; do not repair it unless the user agrees.)")
 
 
@@ -188,7 +188,7 @@ def Check(rel: str, source: str) -> Optional[str]:
     return None
 
 
-_PROMPT = """You are fixing a bug in Ultron, a Python desktop assistant.
+_PROMPT = """You are fixing a bug in Orion, a Python desktop assistant.
 It crashed in {rel} around line {line}{func}.
 Error: {error}
 {notes}
@@ -218,7 +218,7 @@ def Draft(tb: str = "", notes: str = "", ask: Optional[Callable[[str], Optional[
         return "There's no recent error to fix. Tell me what broke, or paste the error."
     place = Locate(tb)
     if place is None:
-        return "That error didn't happen in Ultron's own code (or only in a file I'm not allowed to change)."
+        return "That error didn't happen in Orion's own code (or only in a file I'm not allowed to change)."
     try:
         source = place.path.read_text(encoding="utf-8")
     except OSError as e:
@@ -314,7 +314,7 @@ def Apply(fix: Fix, import_check: Callable[[str], Optional[str]] = ImportProblem
     history.append(entry)
     _SaveHistory(history)
     PushUndo(f"repaired {path.name}", lambda e=entry: RollBack(e["id"]))
-    return f"Repaired {rel}: {fix.explanation} It takes effect when Ultron restarts."
+    return f"Repaired {rel}: {fix.explanation} It takes effect when Orion restarts."
 
 
 def RollBack(repair_id: str = "") -> str:
@@ -330,7 +330,7 @@ def RollBack(repair_id: str = "") -> str:
     shutil.copy2(backup, ROOT / entry["file"])
     entry["status"] = "rolled back"
     _SaveHistory(history)
-    return f"Took back the repair to {entry['file']}. That takes effect when Ultron restarts."
+    return f"Took back the repair to {entry['file']}. That takes effect when Orion restarts."
 
 
 def History(limit: int = 5) -> list[dict]:
@@ -342,8 +342,8 @@ def History(limit: int = 5) -> list[dict]:
 TOOL = {
     "name": "self_repair",
     "description": (
-        "Repairs a bug in Ultron's own code, with the user's say-so. Use when the user asks you to "
-        "fix yourself / repair that / fix the bug, usually after a tool reported a bug in Ultron's "
+        "Repairs a bug in Orion's own code, with the user's say-so. Use when the user asks you to "
+        "fix yourself / repair that / fix the bug, usually after a tool reported a bug in Orion's "
         "own code. 'fix' drafts a small change and puts it on screen for the user to confirm; "
         "nothing changes without that. 'history' lists past repairs; 'rollback' takes the last "
         "one back. Never call 'fix' on your own initiative."

@@ -18,7 +18,7 @@ WHAT IT ACCEPTS
 
 SOUND IS OFF UNTIL ASKED FOR
     A soundtrack talking over the assistant is the one way this feature could
-    make ULTRON worse rather than better, and the microphone is open while it
+    make ORION worse rather than better, and the microphone is open while it
     plays. So it starts muted, and the user turns sound on — from the button in
     the video header, or by saying so. Closing it works both ways too.
 """
@@ -218,7 +218,7 @@ def VideoPlayer(parameters: dict = None, response=None, player=None,
     # answer — the fast clients came back with zero usable formats.
     #
     # So the seconds stay, and what changes is where the user spends them:
-    # listening to ULTRON say it is coming, instead of watching nothing happen.
+    # listening to ORION say it is coming, instead of watching nothing happen.
     # The same shape whatsapp_call uses, and for the same reason.
     threading.Thread(target=PlayYoutube, args=(player, source, BeginOpen()),
                      daemon=True, name="video-open").start()

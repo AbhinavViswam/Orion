@@ -18,12 +18,12 @@ class TestMatching(unittest.TestCase):
         cases = {
             "volume up": ("computer_settings", {"action": "volume_up"}),
             "Turn the volume down please": ("computer_settings", {"action": "volume_down"}),
-            "Ultron, mute.": ("computer_settings", {"action": "mute"}),
+            "Orion, mute.": ("computer_settings", {"action": "mute"}),
             "set volume to 40": ("computer_settings", {"action": "volume_set", "value": "40"}),
             "volume 30%": ("computer_settings", {"action": "volume_set", "value": "30"}),
             "take a screenshot": ("computer_settings", {"action": "screenshot"}),
             "lock the computer": ("computer_settings", {"action": "lock_screen"}),
-            "hey ultron open notepad please": ("open_app", {"app_name": "Notepad"}),
+            "hey orion open notepad please": ("open_app", {"app_name": "Notepad"}),
             "launch visual studio code": ("open_app", {"app_name": "Visual Studio Code"}),
         }
         for text, want in cases.items():
@@ -48,10 +48,10 @@ class TestMatching(unittest.TestCase):
 
 
 def _Live():
-    """An UltronLive with just what the fast path touches."""
+    """An OrionLive with just what the fast path touches."""
     import Main
-    live = Main.UltronLive.__new__(Main.UltronLive)
-    live._asst_name = "ULTRON"
+    live = Main.OrionLive.__new__(Main.OrionLive)
+    live._asst_name = "ORION"
     live._fast_turn = None
     live._fast_n = 0
     live._engine = None
@@ -80,7 +80,7 @@ class TestPaths(unittest.TestCase):
         asyncio.run(live.TypedCommand("volume up"))
         self.assertEqual(live.ran, [("computer_settings", {"action": "volume_up"})])
         live.session.send_client_content.assert_not_called()
-        live.ui.WriteLog.assert_called_with("ULTRON: Volume up.")
+        live.ui.WriteLog.assert_called_with("ORION: Volume up.")
 
     def TestTypedQuestionGoesToTheModel(self):
         live = _Live()

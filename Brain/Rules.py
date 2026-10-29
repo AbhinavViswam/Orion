@@ -1,14 +1,14 @@
 """
 Brain/Rules.py: learning from corrections.
 
-When you correct how Ultron does something ("from now on, call me boss",
+When you correct how Orion does something ("from now on, call me boss",
 "never read my emails out loud", "stop saying sir"), the correction is kept as
 a standing RULE and put into every conversation, so you say it once instead of
 every time. The same design as JARVIS on the phone (memory/LearnedRules.kt and
 tools/builtin/LearnRuleTool.kt).
 
 Rules live in long-term memory under the "rules" category, so Settings ›
-Memory shows them and Forget removes them. They are not silent: Ultron says
+Memory shows them and Forget removes them. They are not silent: Orion says
 what it will do from now on, so a misheard rule is caught at once, and the
 `undo` tool takes one back.
 """
@@ -199,7 +199,7 @@ def _Restore(put_back: list[dict], take_out: list[str]) -> str:
 
 # Not "next time": "next time I'm at the shop, remind me…" is a reminder.
 _SPOKEN = re.compile(
-    r"^(?:(?:hey )?ultron,? )?(?:ok(?:ay)?,? |and |also |please )?(?:from now on|from today on(?:wards)?|"
+    r"^(?:(?:hey )?orion,? )?(?:ok(?:ay)?,? |and |also |please )?(?:from now on|from today on(?:wards)?|"
     r"from now onwards|going forward|always remember to|remember to always|remember never to|"
     r"remember to never)\b,? (.+)$", re.IGNORECASE)
 # "From now on, remind me at 7 every day" is a command, not a rule.
@@ -207,10 +207,10 @@ _COMMAND_START = re.compile(
     r"^(?:please )?(?:remind|set|wake|call(?! me\b)|phone|ring|message|text|send|open|turn|switch|"
     r"play|pause|start|stop the|book|order|search|find|show|tell me)\b", re.IGNORECASE)
 _DROP_ADDRESS = re.compile(
-    r"^(?:(?:hey )?ultron,? )?(?:ok(?:ay)?,? |please )?(?:stop calling me|don'?t call me|do not call me|"
+    r"^(?:(?:hey )?orion,? )?(?:ok(?:ay)?,? |please )?(?:stop calling me|don'?t call me|do not call me|"
     r"stop addressing me as) ([\w '-]{1,30}?)(?: any ?more| now)?$", re.IGNORECASE)
 _DROP_RULE = re.compile(
-    r"^(?:(?:hey )?ultron,? )?(?:ok(?:ay)?,? |please )?(?:forget|drop|remove|delete) (?:the|that|my) "
+    r"^(?:(?:hey )?orion,? )?(?:ok(?:ay)?,? |please )?(?:forget|drop|remove|delete) (?:the|that|my) "
     r"rule (?:about |that |to )?(.+)$", re.IGNORECASE)
 
 

@@ -237,7 +237,7 @@ def FormatTextReport(
     page_url:    str,
 ) -> str:
     lines = [
-        "ULTRON — Flight Search Results",
+        "ORION — Flight Search Results",
         "─" * 50,
         f"Route     : {origin} → {destination}",
         f"Date      : {date}",

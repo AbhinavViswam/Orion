@@ -78,7 +78,7 @@ class TestSpeech(unittest.TestCase):
     def TestSpokenRules(self):
         from Brain import Rules
         self.assertEqual(Rules.FromSpeech("From now on, call me boss"), "Call me boss.")
-        self.assertEqual(Rules.FromSpeech("Ultron, always remember to ask before closing apps"),
+        self.assertEqual(Rules.FromSpeech("Orion, always remember to ask before closing apps"),
                          "Ask before closing apps.")
         for not_a_rule in ("from now on remind me at 7", "from now on, can you be quieter?",
                            "next time I'm at the shop remind me", "call me boss", "from now on"):
@@ -115,7 +115,7 @@ class TestFastPath(_TempMemory):
 
     def TestTheModelsToolWorksToo(self):
         import Main
-        live = Main.UltronLive.__new__(Main.UltronLive)
+        live = Main.OrionLive.__new__(Main.OrionLive)
         live.ui = mock.MagicMock()
         live.ui.muted = False
         live._action_registry = mock.MagicMock()

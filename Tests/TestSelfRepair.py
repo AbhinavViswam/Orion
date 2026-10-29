@@ -1,7 +1,7 @@
 """Self-repair and Skill Forge: nothing changes without a yes, every change is
 checked first and can be taken back, and unsafe code never gets in.
 
-Everything runs in temp folders: the real Ultron files, Plugins/ and Config/
+Everything runs in temp folders: the real Orion files, Plugins/ and Config/
 are never touched, and no model is called (a stand-in answers instead)."""
 import importlib.util
 import shutil
@@ -315,7 +315,7 @@ class TestWiring(unittest.TestCase):
         import Main
         names = {t["name"] for t in Main.TOOL_DECLARATIONS}
         self.assertTrue({"self_repair", "skill_forge"} <= names)
-        live = Main.UltronLive.__new__(Main.UltronLive)
+        live = Main.OrionLive.__new__(Main.OrionLive)
         live.ui = mock.MagicMock()
         live.ui.muted = False
         live._action_registry = mock.MagicMock()

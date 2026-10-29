@@ -1,5 +1,5 @@
 """
-Brain/Usage.py: how much Ultron is used, for Settings › Usage.
+Brain/Usage.py: how much Orion is used, for Settings › Usage.
 
 Two things are kept, the same as JARVIS on the phone:
   * tokens and turns per day, from the usage Gemini reports with its replies

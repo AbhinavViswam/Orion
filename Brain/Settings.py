@@ -52,8 +52,8 @@ def IsConfigured() -> bool:
 
 
 def GetAssistantName() -> str:
-    """Return the configured assistant name, or 'ULTRON' if not set."""
-    return LoadApiKeys().get("assistant_name", "ULTRON") or "ULTRON"
+    """Return the configured assistant name, or 'ORION' if not set."""
+    return LoadApiKeys().get("assistant_name", "ORION") or "ORION"
 
 
 def GetUserName() -> str:
@@ -70,7 +70,7 @@ def SaveAssistantConfig(assistant_name: str, user_name: str) -> None:
             data = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
         except Exception:
             data = {}
-    data["assistant_name"] = assistant_name.strip() or "ULTRON"
+    data["assistant_name"] = assistant_name.strip() or "ORION"
     data["user_name"] = user_name.strip()
     CONFIG_FILE.write_text(json.dumps(data, indent=4), encoding="utf-8")
 

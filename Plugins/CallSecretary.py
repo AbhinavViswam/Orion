@@ -1,8 +1,8 @@
 """
-Call secretary: Ultron answers a WhatsApp call for you and takes a message.
+Call secretary: Orion answers a WhatsApp call for you and takes a message.
 
-Only when you ask. While a WhatsApp voice call rings on the PC, say "Ultron,
-take this call". Ultron then:
+Only when you ask. While a WhatsApp voice call rings on the PC, say "Orion,
+take this call". Orion then:
 
   1. closes its own microphone (everything it hears now is the call),
   2. presses Accept in WhatsApp Desktop,
@@ -13,12 +13,12 @@ take this call". Ultron then:
   6. writes the message down with Gemini, shows it in the panel, tells you,
      and opens its microphone again.
 
-While it is on the call a banner offers "Take the call?": confirm it and Ultron
+While it is on the call a banner offers "Take the call?": confirm it and Orion
 tells the caller you're joining and steps aside. The microphone then opens by
 itself when the call ends.
 
 HOW THE AUDIO GETS THROUGH
-    Ultron's voice plays from the speakers and WhatsApp's microphone picks it
+    Orion's voice plays from the speakers and WhatsApp's microphone picks it
     up, so the caller hears it. The caller is heard through "Stereo Mix" (a
     recording of what the speakers play) when the PC has it, otherwise through
     the microphone. With headphones on, the microphone can't hear the caller,
@@ -92,10 +92,10 @@ def Settings() -> dict:
     try:
         from Brain.Settings import GetUserName, LoadApiKeys
         name = (GetUserName() or "").strip()
-        assistant = (LoadApiKeys().get("assistant_name") or "Ultron").strip().title()
+        assistant = (LoadApiKeys().get("assistant_name") or "Orion").strip().title()
     except Exception:
-        name, assistant = "", "Ultron"
-    fill = {"name": name or "the person you called", "assistant": assistant or "Ultron"}
+        name, assistant = "", "Orion"
+    fill = {"name": name or "the person you called", "assistant": assistant or "Orion"}
 
     def Text(key, default):
         raw = str(cfg.get(key) or "").strip() or default
@@ -499,7 +499,7 @@ class Secretary:
 
             if self.took_over:
                 self.sound.Say(cfg["joining"])
-                Log("SYS: You have the call. Ultron's microphone opens again when it ends.")
+                Log("SYS: You have the call. Orion's microphone opens again when it ends.")
                 reopen = reopen and self._WaitForEnd()
             else:
                 self.sound.Say(cfg["goodbye"])
@@ -520,7 +520,7 @@ class Secretary:
         if Confirm.PendingTitle():
             return ""
         title = f"Take the call from {caller}?"
-        Confirm.request("call_take_over", title, "Ultron is taking a message. Confirm to talk to them "
+        Confirm.request("call_take_over", title, "Orion is taking a message. Confirm to talk to them "
                         "yourself.", self.TakeOver)
         return title
 
@@ -621,7 +621,7 @@ PLUGIN_SETTINGS = {
     "title": "Call secretary (WhatsApp)",
     "fields": [
         {"key": "greeting", "label": "Greeting", "type": "text", "default": DEFAULT_GREETING,
-         "placeholder": "{name} = your name, {assistant} = Ultron's name"},
+         "placeholder": "{name} = your name, {assistant} = Orion's name"},
         {"key": "goodbye", "label": "Goodbye", "type": "text", "default": DEFAULT_GOODBYE},
         {"key": "listen_through", "label": "Hear the caller through", "type": "choice",
          "options": _InputChoices(), "default": "Automatic"},

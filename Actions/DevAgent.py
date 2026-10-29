@@ -14,7 +14,7 @@ def GetBaseDir():
 
 BASE_DIR         = GetBaseDir()
 API_CONFIG_PATH  = BASE_DIR / "Config" / "ApiKeys.json"
-PROJECTS_DIR     = Path.home() / "Desktop" / "UltronProjects"
+PROJECTS_DIR     = Path.home() / "Desktop" / "OrionProjects"
 MAX_FIX_ATTEMPTS = 5
 # Model choice, timeout and fallback ladder all live in core/gemini.py.
 from Brain import Gemini
@@ -465,7 +465,7 @@ def BuildProject(
         if speak: speak(msg)
         return msg
 
-    proj_name    = project_name or plan.get("project_name", "ultron_project")
+    proj_name    = project_name or plan.get("project_name", "orion_project")
     proj_name    = re.sub(r"[^\w\-]", "_", proj_name)
     project_dir  = PROJECTS_DIR / proj_name
     project_dir.mkdir(parents=True, exist_ok=True)

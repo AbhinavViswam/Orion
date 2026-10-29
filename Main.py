@@ -49,14 +49,14 @@ import sounddevice as sd
 import numpy as np
 from google import genai
 from google.genai import types
-from Interface.Window import UltronUI
+from Interface.Window import OrionUI
 from Brain.Memory import LoadMemory, UpdateMemory, FormatMemoryForPrompt, SaveSessionSummary, PopLastSession, SearchMemory, SetTrimNotifier
 
 # The file-backed tools (open_app, web_search, browser_control, …) are no longer
 # imported or declared here — they self-describe via a TOOL dict in their own
 # actions/*.py file and are auto-discovered by core.action_loader at startup.
 # Only tools that are tied to live-session state stay inline in this file
-# (screen_process, close_camera, save_memory, manage_monitor, shutdown_ultron,
+# (screen_process, close_camera, save_memory, manage_monitor, shutdown_orion,
 # system_status).
 from Brain import Outcome
 from Brain import Usage
@@ -124,7 +124,7 @@ def PcmLevel(samples) -> float:
 
 
 # ── Voice level schedule ──────────────────────────────────────────────────────
-# Ultron's own voice is handed to the HUD as a level per 20 ms slice, so the
+# Orion's own voice is handed to the HUD as a level per 20 ms slice, so the
 # reactor moves in step with what is coming out of the speakers.
 # Extra time beyond the device's reported output latency before the microphone
 # is trusted again: covers room decay and the speaker's own settling.
@@ -268,7 +268,7 @@ def LoadSystemPrompt() -> str:
         return PROMPT_PATH.read_text(encoding="utf-8")
     except Exception:
         return (
-            "You are Ultron, Abhinav Viswam's AI assistant. "
+            "You are Orion, Abhinav Viswam's AI assistant. "
             "Be concise, direct, and always use the provided tools to complete tasks. "
             "Never simulate or guess results — always call the appropriate tool."
         )
@@ -302,7 +302,7 @@ TOOL_DECLARATIONS = [
     # handling is woven into live-session state — vision capture/injection,
     # camera stream, memory writes, the monitor engine, and shutdown. All other
     # tools live in their own action file and are auto-discovered by
-    # core.action_loader (see UltronLive.__init__).
+    # core.action_loader (see OrionLive.__init__).
     {
         "name": "system_status",
         "description": (
@@ -347,7 +347,7 @@ TOOL_DECLARATIONS = [
         "name": "manage_monitor",
         "description": (
             "Add, remove, or list background monitoring topics. "
-            "ULTRON checks these topics once a day and alerts the user when there is a new development. "
+            "ORION checks these topics once a day and alerts the user when there is a new development. "
             "Use 'add' when the user says 'monitor X', 'track X', 'follow X'. "
             "Use 'remove' when the user says 'stop monitoring X'. "
             "Use 'list' when the user asks what is being monitored. "
@@ -369,11 +369,11 @@ TOOL_DECLARATIONS = [
         },
     },
     {
-        "name": "shutdown_ultron",
+        "name": "shutdown_orion",
         "description": (
             "Shuts down the assistant completely. "
             "Call this when the user expresses intent to end the conversation, "
-            "close the assistant, say goodbye, or stop Ultron. "
+            "close the assistant, say goodbye, or stop Orion. "
             "The user can say this in ANY language."
         ),
         "parameters": {
@@ -526,8 +526,8 @@ def KeepContextOf(exc: BaseException) -> bool:
     return True
 
 
-class UltronLive:
-    def __init__(self, ui: UltronUI):
+class OrionLive:
+    def __init__(self, ui: OrionUI):
         # Platform limits are announced once per run, not once per
         # reconnect: a dropped connection is not news about Wayland.
         self._platform_notes_shown = False
@@ -650,7 +650,7 @@ class UltronLive:
             try:
                 self.SetPushToTalk(True)
             except Exception as e:
-                print(f"[ULTRON] ⚠ Push-to-talk unavailable: {e}")
+                print(f"[ORION] ⚠ Push-to-talk unavailable: {e}")
 
     def OnSkillsChanged(self) -> None:
         """A forged skill was added or removed. Reconnect so the model's tool
@@ -659,7 +659,7 @@ class UltronLive:
 
     def PluginSay(self, instruction: str) -> None:
         """
-        Thread-safe speech channel for plugins: lets a plugin ask ULTRON to
+        Thread-safe speech channel for plugins: lets a plugin ask ORION to
         say something short WHILE its run() is still executing (plugins block
         their executor thread, so they can't speak through the tool response
         until they finish). The instruction is injected into the Live session
@@ -714,7 +714,7 @@ class UltronLive:
             if deadline is None or time.monotonic() < deadline:
                 continue
             self.ClearStall()
-            print(f"[ULTRON] ⚠️  No response for {_STALL_LIMIT:.0f}s — "
+            print(f"[ORION] ⚠️  No response for {_STALL_LIMIT:.0f}s — "
                   f"the live session is not answering. Rebuilding it.")
             self.ui.WriteLog("SYS: The model stopped answering — reconnecting.")
             self.RequestReconnect(keep_context=True, reason="no response")
@@ -779,7 +779,7 @@ class UltronLive:
         try:
             reply = await self.RunFastCommand(text)
         except Exception as e:
-            print(f"[ULTRON] fast command failed: {e}")
+            print(f"[ORION] fast command failed: {e}")
             reply = None
         if reply is not None:
             self.ui.WriteLog(f"{self._asst_name}: {reply}")
@@ -801,7 +801,7 @@ class UltronLive:
         so only commands that DO something are worth taking over."""
         if not GetFastCommandsEnabled():
             return None
-        m = FastCommands.Find(text, (self._asst_name.lower(), "ultron"))
+        m = FastCommands.Find(text, (self._asst_name.lower(), "orion"))
         if m is None or (live and m.tool is None):
             return None
         result = ""
@@ -811,7 +811,7 @@ class UltronLive:
             fr = await self.ExecuteTool(fc)
             result = str((fr.response or {}).get("result", ""))
         reply = m.reply(result)
-        print(f"[ULTRON] fast command: {m.label or text} -> {reply}")
+        print(f"[ORION] fast command: {m.label or text} -> {reply}")
         return reply
 
     async def CheckFastTurn(self, heard: str) -> None:
@@ -826,7 +826,7 @@ class UltronLive:
         try:
             reply = await self.RunFastCommand(heard, live=True)
         except Exception as e:
-            print(f"[ULTRON] fast command failed: {e}")
+            print(f"[ORION] fast command failed: {e}")
             reply = None
         if reply is not None:
             self._fast_turn = reply
@@ -896,7 +896,7 @@ class UltronLive:
                 asyncio.run_coroutine_threadsafe(
                     self._engine.FlushMicrophone(SEND_SAMPLE_RATE), self._loop)
             except Exception as e:
-                print(f"[ULTRON] PTT flush failed: {e}")
+                print(f"[ORION] PTT flush failed: {e}")
         try:
             # Releasing the key does not mean the assistant went to sleep: it
             # is still listening for the next press.
@@ -905,7 +905,7 @@ class UltronLive:
             pass
 
     def interrupt(self) -> None:
-        """Stop ULTRON mid-speech: drain queued audio and open mic immediately."""
+        """Stop ORION mid-speech: drain queued audio and open mic immediately."""
         self._interrupted = True
         q = self.audio_in_queue
         if q:
@@ -917,7 +917,7 @@ class UltronLive:
                 except Exception:
                     break
             if drained:
-                print(f"[ULTRON] ✋ Interrupted — {drained} audio chunks discarded")
+                print(f"[ORION] ✋ Interrupted — {drained} audio chunks discarded")
         self.SetSpeaking(False)
         self._play_cursor = 0.0     # next batch starts a fresh timeline
         if self._turn_done_event:
@@ -954,10 +954,10 @@ class UltronLive:
         # Load customization from config
         try:
             _cfg = json.loads(open(API_CONFIG_PATH, encoding="utf-8").read())
-            self._asst_name = (_cfg.get("assistant_name") or "ULTRON").strip()
+            self._asst_name = (_cfg.get("assistant_name") or "ORION").strip()
             _user_name = (_cfg.get("user_name") or "").strip()
         except Exception:
-            self._asst_name = "ULTRON"
+            self._asst_name = "ORION"
             _user_name = ""
 
         memory     = LoadMemory()
@@ -1029,7 +1029,7 @@ class UltronLive:
                 _all_decls = [d for d in _all_decls
                               if (d.get("name") if isinstance(d, dict)
                                   else getattr(d, "name", "")) not in _blocked]
-                print(f"[ULTRON] {len(_blocked)} tool(s) withheld — "
+                print(f"[ORION] {len(_blocked)} tool(s) withheld — "
                       f"this engine cannot serve them")
 
         _names = {(d.get("name") if isinstance(d, dict) else getattr(d, "name", ""))
@@ -1078,7 +1078,7 @@ class UltronLive:
                 handle=self._resume_handle
             ),
             # Sliding-window compression: session never dies from a full context
-            # window — ULTRON can stay in one conversation for hours
+            # window — ORION can stay in one conversation for hours
             context_window_compression=types.ContextWindowCompressionConfig(
                 sliding_window=types.SlidingWindow(),
             ),
@@ -1091,7 +1091,7 @@ class UltronLive:
             ),
         )
         if self._enhanced_live:
-            # Proactive audio: ULTRON stays silent when speech isn't addressed
+            # Proactive audio: ORION stays silent when speech isn't addressed
             # to it (background chatter, talking to someone else in the room).
             # (Affective dialog was dropped: gemini-3.1-flash-live does not
             #  support it, and it never reliably detected tone in practice.
@@ -1174,7 +1174,7 @@ class UltronLive:
         name = fc.name
         args = dict(fc.args or {})
 
-        print(f"[ULTRON] 🔧 {name}  {args}")
+        print(f"[ORION] 🔧 {name}  {args}")
         self.ui.SetState("THINKING")
 
 
@@ -1274,7 +1274,7 @@ class UltronLive:
                 else:
                     result = "Specify action (add/remove/list) and a topic."
 
-            elif name == "shutdown_ultron":
+            elif name == "shutdown_orion":
                 self.ui.WriteLog("SYS: Shutdown requested.")
                 async def _do_shutdown():
                     await self._SaveSessionSummary()
@@ -1336,7 +1336,7 @@ class UltronLive:
         if not self.ui.muted:
             self.ui.SetState("LISTENING")
 
-        print(f"[ULTRON] 📤 {name} → {str(result)[:80]}")
+        print(f"[ORION] 📤 {name} → {str(result)[:80]}")
 
         # A tool that declared itself NON_BLOCKING also says when its answer may
         # re-enter the conversation. Without this the model finishes whatever it
@@ -1369,24 +1369,24 @@ class UltronLive:
             )
 
     async def ListenAudio(self):
-        print("[ULTRON] 🎤 Mic started")
+        print("[ORION] 🎤 Mic started")
         loop = asyncio.get_event_loop()
 
         def callback(indata, frames, time_info, status):
             with self._speaking_lock:
-                ultron_speaking = self._is_speaking
+                orion_speaking = self._is_speaking
 
             # ── Barge-in ─────────────────────────────────────────────────────
-            # While ULTRON talks the mic is not streamed, but it is still worth
+            # While ORION talks the mic is not streamed, but it is still worth
             # listening to locally: if the user starts speaking, cut the answer
             # short the way a person would stop when interrupted.
             #
-            # The whole difficulty is echo — on speakers the mic hears ULTRON.
+            # The whole difficulty is echo — on speakers the mic hears ORION.
             # So the test is not "is the mic loud" but "is the mic louder than
             # the echo of what we are playing right now", sustained long enough
             # that a cough or a keystroke cannot trigger it.
-            if ultron_speaking:
-                # Nothing is streamed while ULTRON talks.
+            if orion_speaking:
+                # Nothing is streamed while ORION talks.
                 #
                 # Interrupting by voice used to live here: `EchoGuard` can pick a
                 # user out from under our own echo, and `core/echo.py` still does
@@ -1452,7 +1452,7 @@ class UltronLive:
             _mic_name = GetInputDevice()
             _mic_dev  = AudioDevices.resolve(_mic_name, "input")
             if _mic_dev is not None:
-                print(f"[ULTRON] 🎤 Input device: {_mic_name}")
+                print(f"[ORION] 🎤 Input device: {_mic_name}")
             def OpenAny():
                 try:
                     return OpenMic(_mic_dev)
@@ -1463,7 +1463,7 @@ class UltronLive:
                     # mean the assistant cannot hear at all.
                     if _mic_dev is None:
                         raise
-                    print(f"[ULTRON] ⚠️  Mic '{_mic_name}' failed: {_e} — using default")
+                    print(f"[ORION] ⚠️  Mic '{_mic_name}' failed: {_e} — using default")
                     self.ui.WriteLog(
                         f"SYS: Microphone '{_mic_name}' unavailable — using system default."
                     )
@@ -1480,11 +1480,11 @@ class UltronLive:
                             _mic_stream.stop()
                             _mic_stream.close()
                             _mic_stream = None
-                            print("[ULTRON] 🎤 Mic closed (muted)")
+                            print("[ORION] 🎤 Mic closed (muted)")
                     elif _mic_stream is None:
                         _mic_stream = OpenAny()
                         _mic_stream.start()
-                        print("[ULTRON] 🎤 Mic stream open")
+                        print("[ORION] 🎤 Mic stream open")
                     await asyncio.sleep(0.1)
             finally:
                 if _mic_stream is not None:
@@ -1494,7 +1494,7 @@ class UltronLive:
                     except Exception:
                         pass
         except Exception as e:
-            print(f"[ULTRON] ❌ Mic: {e}")
+            print(f"[ORION] ❌ Mic: {e}")
             raise
 
     async def FlushPendingVision(self) -> bool:
@@ -1532,7 +1532,7 @@ class UltronLive:
         )
 
         if self._vision_cam_active:
-            # Camera: stay busy until ULTRON has finished speaking the answer,
+            # Camera: stay busy until ORION has finished speaking the answer,
             # then close the preview.
             self._vision_cam_active    = False
             self._vision_close_pending = True
@@ -1541,7 +1541,7 @@ class UltronLive:
         return True
 
     async def ReceiveAudio(self):
-        print("[ULTRON] 👂 Recv started")
+        print("[ORION] 👂 Recv started")
         out_buf, in_buf = [], []
 
         try:
@@ -1570,7 +1570,7 @@ class UltronLive:
                     if _sru is not None:
                         if getattr(_sru, "resumable", False) and getattr(_sru, "new_handle", None):
                             if self._resume_handle is None:
-                                print("[ULTRON] 🔗 Session resumption armed")
+                                print("[ORION] 🔗 Session resumption armed")
                             self._resume_handle = _sru.new_handle
 
                     # The model answering (sound, words or a tool call) means
@@ -1661,7 +1661,7 @@ class UltronLive:
                     if response.tool_call:
                         fn_responses = []
                         for fc in response.tool_call.function_calls:
-                            print(f"[ULTRON] 📞 {fc.name}")
+                            print(f"[ORION] 📞 {fc.name}")
                             if self._fast_turn:
                                 # Already done by the fast path this turn: say
                                 # so instead of doing it twice.
@@ -1679,17 +1679,17 @@ class UltronLive:
                         )
                         await self.FlushPendingVision()
         except Exception as e:
-            print(f"[ULTRON] ❌ Recv: {e}")
+            print(f"[ORION] ❌ Recv: {e}")
             traceback.print_exc()
             raise
 
     async def PlayAudio(self):
-        print("[ULTRON] 🔊 Play started")
+        print("[ORION] 🔊 Play started")
 
         _spk_name = GetOutputDevice()
         _spk_dev  = AudioDevices.resolve(_spk_name, "output")
         if _spk_dev is not None:
-            print(f"[ULTRON] 🔊 Output device: {_spk_name}")
+            print(f"[ORION] 🔊 Output device: {_spk_name}")
 
         def OpenSpk(dev):
             st = sd.RawOutputStream(
@@ -1710,7 +1710,7 @@ class UltronLive:
             # cost the user their voice. Fall back to the default and say so.
             if _spk_dev is None:
                 raise
-            print(f"[ULTRON] ⚠️  Output device '{_spk_name}' failed: {_e} — using default")
+            print(f"[ORION] ⚠️  Output device '{_spk_name}' failed: {_e} — using default")
             self.ui.WriteLog(f"SYS: Speaker '{_spk_name}' unavailable — using system default.")
             stream = OpenSpk(None)
 
@@ -1722,7 +1722,7 @@ class UltronLive:
             lat = float(getattr(stream, "latency", 0.0) or 0.0)
             if 0.0 < lat < 1.0:
                 self._out_latency = lat
-            print(f"[ULTRON] 🔊 Output latency {self._out_latency*1000:.0f} ms "
+            print(f"[ORION] 🔊 Output latency {self._out_latency*1000:.0f} ms "
                   f"→ echo tail {(self._out_latency + _TAIL_MARGIN)*1000:.0f} ms")
         except Exception:
             pass
@@ -1756,7 +1756,7 @@ class UltronLive:
                     except asyncio.QueueEmpty:
                         break
 
-                # Drive the HUD waveform and the reactor from ULTRON's own
+                # Drive the HUD waveform and the reactor from ORION's own
                 # voice. The batch is up to 200 ms long, so we hand over a
                 # *schedule* of 20 ms level frames instead of a single averaged
                 # level and let the HUD play it out in step with the audio.
@@ -1810,7 +1810,7 @@ class UltronLive:
                 except (RuntimeError, asyncio.CancelledError):
                     break   # executor shutting down — exit cleanly
         except Exception as e:
-            print(f"[ULTRON] ❌ Play: {e}")
+            print(f"[ORION] ❌ Play: {e}")
             raise
         finally:
             self.SetSpeaking(False)
@@ -1882,7 +1882,7 @@ class UltronLive:
             turns={"role": "user", "parts": [{"text": p1}]},
             turn_complete=True,
         )
-        print("[ULTRON] Briefing phase 1 (greeting) sent.")
+        print("[ORION] Briefing phase 1 (greeting) sent.")
 
         # ── Phase 2: fire as soon as Phase 1 audio is done ───────────────────
         async def DeliverNews():
@@ -1945,10 +1945,10 @@ class UltronLive:
                     turns={"role": "user", "parts": [{"text": p2}]},
                     turn_complete=True,
                 )
-                print("[ULTRON] Briefing phase 2 (news) sent.")
+                print("[ORION] Briefing phase 2 (news) sent.")
             except Exception as e:
                 print(f"[Briefing] Phase 2 error: {e}")
-                print(f"[ULTRON] Briefing phase 2 failed: {e}")
+                print(f"[ORION] Briefing phase 2 failed: {e}")
                 self.ui.WriteLog("SYS: Could not fetch the news for the briefing.")
 
         asyncio.create_task(DeliverNews())
@@ -2012,7 +2012,7 @@ class UltronLive:
         await asyncio.sleep(300)          # wait 5 min after startup before first check
         while True:
             if self.session:
-                # Don't interrupt if user spoke recently or ULTRON is mid-sentence
+                # Don't interrupt if user spoke recently or ORION is mid-sentence
                 with self._speaking_lock:
                     speaking = self._is_speaking
                 recent_speech = (time.monotonic() - self._last_user_speech) < 30
@@ -2032,7 +2032,7 @@ class UltronLive:
                                 turns={"role": "user", "parts": [{"text": msg}]},
                                 turn_complete=True,
                             )
-                            print("[ULTRON] Monitor alert sent.")
+                            print("[ORION] Monitor alert sent.")
                             await asyncio.sleep(6)   # gap between consecutive alerts
                     except Exception as e:
                         print(f"[Monitor] ⚠️ Background check error: {e}")
@@ -2075,7 +2075,7 @@ class UltronLive:
                     turns={"role": "user", "parts": [{"text": prompt}]},
                     turn_complete=True,
                 )
-                print("[ULTRON] Proactive check-in.")
+                print("[ORION] Proactive check-in.")
             except Exception as e:
                 print(f"[Proactive] ⚠️ {e}")
 
@@ -2136,7 +2136,7 @@ class UltronLive:
                         f"SYS: {llm_id} "
                         + ("can see images." if seen else "is text only."))
                 except Exception as e:
-                    print(f"[ULTRON] vision check skipped: {e}")
+                    print(f"[ORION] vision check skipped: {e}")
 
             caps = dict(getattr(llm, "caps", {}) or {})
             caps["audio_out"] = bool(str(pipe.get("tts") or "").strip())
@@ -2147,7 +2147,7 @@ class UltronLive:
             # the reason is said out loud rather than left in a console.
             self.ui.WriteLog(f"SYS: local engine unavailable ({e}) — "
                               f"using Gemini Live.")
-            print(f"[ULTRON] Pipeline engine unavailable: {e}")
+            print(f"[ORION] Pipeline engine unavailable: {e}")
             return None
 
     @asynccontextmanager
@@ -2229,7 +2229,7 @@ class UltronLive:
 
         while True:
             try:
-                print("[ULTRON] Connecting...")
+                print("[ORION] Connecting...")
                 self.ui.SetState("THINKING")
                 # Pick the rung to open the conversation on. A model resting
                 # off a quota limit is skipped; the name is published back to
@@ -2237,7 +2237,7 @@ class UltronLive:
                 global LIVE_MODEL
                 LIVE_MODEL = _gemini.LiveModel()
                 live_model = LIVE_MODEL
-                print(f"[ULTRON] Live model: {live_model}")
+                print(f"[ORION] Live model: {live_model}")
 
                 _resumed_with = self._resume_handle is not None
 
@@ -2286,7 +2286,7 @@ class UltronLive:
                     self._vision_last_time     = 0.0
                     self._interrupted          = False
 
-                    print("[ULTRON] Connected.")
+                    print("[ORION] Connected.")
                     if _resumed_with:
                         # Say it plainly: the difference between "it reconnected"
                         # and "it reconnected and still knows what we were doing"
@@ -2294,7 +2294,7 @@ class UltronLive:
                         self.ui.WriteLog("SYS: Reconnected — conversation restored.")
 
                     self.ui.SetState("LISTENING")
-                    self.ui.WriteLog("SYS: ULTRON online.")
+                    self.ui.WriteLog("SYS: ORION online.")
 
                     # What this machine will not permit, said once, on screen.
                     #
@@ -2351,7 +2351,7 @@ class UltronLive:
                 # Voluntary reconnect (voice change) — not an error. Rebuild the
                 # session immediately with no backoff and no scary logs.
                 if IsReconnectSignal(e):
-                    print("[ULTRON] Voluntary reconnect requested.")
+                    print("[ORION] Voluntary reconnect requested.")
                     if not KeepContextOf(e):
                         # A deliberate clean slate (voice change) — drop the
                         # handle so the next connect really does start empty.
@@ -2371,19 +2371,19 @@ class UltronLive:
                     or "INVALID_ARGUMENT" in str(e)
                     or "NOT_FOUND" in str(e)
                 ):
-                    print("[ULTRON] 🔗 Resumption handle rejected — starting a fresh session")
+                    print("[ORION] 🔗 Resumption handle rejected — starting a fresh session")
                     self.ui.WriteLog("SYS: Could not restore the conversation — starting fresh.")
                     self._resume_handle = None
                     self._conn_backoff = 0
                     continue
 
                 err_str = str(e)
-                print(f"[ULTRON] Error ({type(e).__name__}): {e}")
+                print(f"[ORION] Error ({type(e).__name__}): {e}")
                 traceback.print_exc()
 
                 # Out of quota, or this model is not available to this key —
                 # step down the ladder and reconnect straight away. This is the
-                # difference between "ULTRON is quieter today" and "ULTRON does
+                # difference between "ORION is quieter today" and "ORION does
                 # not start today": one model means one daily limit, and the
                 # limit always arrives mid-conversation.
                 if _gemini.NoteLiveFailure(live_model, err_str):
@@ -2411,7 +2411,7 @@ class UltronLive:
                     or "thinking" in err_str.lower()
                 ):
                     self._tuned_live = False
-                    print("[ULTRON] Live tuning rejected — reconnecting without it.")
+                    print("[ORION] Live tuning rejected — reconnecting without it.")
                     continue
 
                 # Proactive audio rejected by the server (preview API drift) —
@@ -2435,7 +2435,7 @@ class UltronLive:
                     self.ui.PromptReconfig()
                     while not self.ui._win._ready:
                         await asyncio.sleep(1)
-                    print("[ULTRON] New API key saved — reconnecting...")
+                    print("[ORION] New API key saved — reconnecting...")
                     _conn_backoff = 3
                     continue
 
@@ -2464,17 +2464,17 @@ class UltronLive:
 
 
             delay = getattr(self, "_conn_backoff", 3)
-            print(f"[ULTRON] Reconnecting in {delay}s...")
+            print(f"[ORION] Reconnecting in {delay}s...")
             await asyncio.sleep(delay)
 
 def main():
-    ui = UltronUI()
+    ui = OrionUI()
 
     def runner():
         ui.WaitForApiKey()
-        ultron = UltronLive(ui)
+        orion = OrionLive(ui)
         try:
-            asyncio.run(ultron.run())
+            asyncio.run(orion.run())
         except KeyboardInterrupt:
             print("\n🔴 Shutting down...")
 

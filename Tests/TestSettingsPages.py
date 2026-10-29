@@ -65,7 +65,7 @@ class TestMemoryPage(_Base):
         M.MEMORY_PATH = self.tmp / "LongTerm.json"
         M.remember("favourite_coffee", "flat white", "preferences")
         M.remember("sister", "Dilsha", "relationships")
-        self.page = self.W.MemoryPage("ULTRON")
+        self.page = self.W.MemoryPage("ORION")
         # Shown (off screen) so rows added by a refresh really appear.
         from PyQt6.QtCore import Qt
         self.page.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen, True)
@@ -255,7 +255,7 @@ class TestVoicePage(_Base):
         for p in patches:
             p.start()
             self.addCleanup(p.stop)
-        return self.W.VoicePage("ULTRON")
+        return self.W.VoicePage("ORION")
 
     def TestPickingADeviceSavesIt(self):
         store, asked = {}, []

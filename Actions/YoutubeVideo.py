@@ -126,7 +126,7 @@ def AskForUrl(prompt_text: str = "YouTube video URL:") -> str | None:
             root = tk.Tk()
             root.withdraw()
 
-        url = simpledialog.askstring("ULTRON", prompt_text, parent=root)
+        url = simpledialog.askstring("ORION", prompt_text, parent=root)
         return url.strip() if url else None
     except Exception as e:
         print(f"[YouTube] ⚠️ URL dialog failed: {e}")
@@ -180,7 +180,7 @@ def SummarizeWithGemini(transcript: str, video_url: str) -> str:
         timeout_ms=60_000,
         config=types.GenerateContentConfig(
             system_instruction=(
-                "You are ULTRON, an AI assistant. "
+                "You are ORION, an AI assistant. "
                 "Summarize YouTube video transcripts clearly and concisely. "
                 "Structure: 1-sentence overview, then 3-5 key points. "
                 "Be direct. Address the user as 'sir'. "
@@ -201,7 +201,7 @@ def SaveSummary(content: str, video_url: str) -> str:
     filepath = desktop / filename
 
     header = (
-        f"ULTRON — YouTube Summary\n"
+        f"ORION — YouTube Summary\n"
         f"{'─' * 50}\n"
         f"URL    : {video_url}\n"
         f"Date   : {datetime.now().strftime('%Y-%m-%d %H:%M')}\n"

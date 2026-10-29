@@ -1,5 +1,5 @@
 """Interface: reactor, hotkeys, app matching, and the window itself (built
-off-screen; nothing is shown and Ultron is not started)."""
+off-screen; nothing is shown and Orion is not started)."""
 import shutil
 import tempfile
 import unittest
@@ -127,13 +127,24 @@ class TestWindow(unittest.TestCase):
         import sys
         tmp = Path(tempfile.mkdtemp())
         try:
-            lnk = tmp / "ULTRON.lnk"
+            lnk = tmp / "ORION.lnk"
             pyw = Path(sys.executable).parent / "pythonw.exe"
             self.Window.MainWindow.CreateLnkWindows(str(lnk), str(pyw), str(ROOT / "Main.py"),
-                                                    str(ROOT), str(ROOT / "Config" / "Ultron.ico"))
+                                                    str(ROOT), str(ROOT / "Config" / "Orion.ico"))
             self.assertTrue(lnk.exists())
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
+
+    def TestAppIconHasEverySize(self):
+        """Config/Orion.ico is the reactor badge, with a frame for each size
+        Windows asks for (taskbar 16-48, desktop 256)."""
+        from PIL import Image
+        ico = ROOT / "Config" / "Orion.ico"
+        self.assertTrue(ico.exists())
+        sizes = Image.open(ico).info.get("sizes", set())
+        for s in (16, 24, 32, 48, 256):
+            self.assertIn((s, s), sizes)
+        self.assertFalse(QIcon(str(ico)).isNull())
 
 
 if __name__ == "__main__":

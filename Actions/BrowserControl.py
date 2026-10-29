@@ -170,7 +170,7 @@ def RealProfileDir(browser: str) -> str:
             print(f"[Browser] ✅ Real profile found for {browser}: {p}")
             return str(p)
 
-    fallback = home / ".ultron_profiles" / browser
+    fallback = home / ".orion_profiles" / browser
     fallback.mkdir(parents=True, exist_ok=True)
     print(f"[Browser] ⚠️  Real profile not found for {browser}, using: {fallback}")
     return str(fallback)
@@ -625,7 +625,7 @@ class _BrowserSession:
 
         if engine_name == "firefox":
             profile = FirefoxProfileDir() or str(
-                Path.home() / ".ultron_profiles" / "firefox"
+                Path.home() / ".orion_profiles" / "firefox"
             )
             kwargs: dict = {
                 "headless":    False,
@@ -639,17 +639,17 @@ class _BrowserSession:
             try:
                 self._context = await engine_obj.launch_persistent_context(profile, **kwargs)
             except Exception as e:
-                print(f"[Browser] Firefox real profile failed ({e}), using ULTRON profile")
-                ultron = str(Path.home() / ".ultron_profiles" / "firefox_ultron")
-                Path(ultron).mkdir(parents=True, exist_ok=True)
-                self._context = await engine_obj.launch_persistent_context(ultron, **kwargs)
+                print(f"[Browser] Firefox real profile failed ({e}), using ORION profile")
+                orion = str(Path.home() / ".orion_profiles" / "firefox_orion")
+                Path(orion).mkdir(parents=True, exist_ok=True)
+                self._context = await engine_obj.launch_persistent_context(orion, **kwargs)
 
             self._page = await self.AdoptPage()
             print(f"[Browser] ✅ Firefox launched")
             return
 
         if engine_name == "webkit":
-            safari_profile = str(Path.home() / ".ultron_profiles" / "safari")
+            safari_profile = str(Path.home() / ".orion_profiles" / "safari")
             Path(safari_profile).mkdir(parents=True, exist_ok=True)
             kwargs = {
                 "headless":    False,
@@ -722,17 +722,17 @@ class _BrowserSession:
 
         # The real profile could not be opened (browser already open / locked
         # profile / newer Chrome versions block the real profile under
-        # automation). Fall back to a persistent ULTRON automation profile —
+        # automation). Fall back to a persistent ORION automation profile —
         # accounts logged in here once stay logged in on later sessions too.
-        ultron_profile = str(Path.home() / ".ultron_profiles" / self.browser_name)
-        Path(ultron_profile).mkdir(parents=True, exist_ok=True)
-        print(f"[Browser] Retrying with ULTRON profile: {ultron_profile}")
+        orion_profile = str(Path.home() / ".orion_profiles" / self.browser_name)
+        Path(orion_profile).mkdir(parents=True, exist_ok=True)
+        print(f"[Browser] Retrying with ORION profile: {orion_profile}")
 
         try:
-            self._context = await engine_obj.launch_persistent_context(ultron_profile, **kwargs)
+            self._context = await engine_obj.launch_persistent_context(orion_profile, **kwargs)
             self._page = await self.AdoptPage()
             self.profile_kind = "separate"
-            print(f"[Browser] ✅ Launched [{label}] with ULTRON profile "
+            print(f"[Browser] ✅ Launched [{label}] with ORION profile "
                   f"(sign-ins persist across sessions)")
         except Exception as e2:
             raise RuntimeError(f"Could not launch {self.browser_name}: {e2}") from e2
@@ -950,7 +950,7 @@ class _BrowserSession:
     async def screenshot(self, path: str = None) -> str:
         page = await self._get_page()
         try:
-            save_path = path or str(Path.home() / "Desktop" / "ultron_screenshot.png")
+            save_path = path or str(Path.home() / "Desktop" / "orion_screenshot.png")
             await page.screenshot(path=save_path, full_page=False)
             return f"Screenshot saved: {save_path}"
         except Exception as e:
