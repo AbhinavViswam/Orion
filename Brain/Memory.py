@@ -52,6 +52,7 @@ def EmptyMemory() -> dict:
         "relationships": {},
         "wishes":        {},
         "notes":         {},
+        "rules":         {},      # corrections kept as standing rules (Brain/Rules.py)
     }
 
 def LoadMemory() -> dict:

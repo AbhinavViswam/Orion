@@ -53,6 +53,52 @@ To get a desktop icon, open **⚙ Setup → Create desktop shortcut**.
 
 Push-to-talk is in Settings › General if you'd rather hold a key to speak.
 
+**Fast commands.** Everyday commands run at once on this computer, with no model:
+volume (up, down, mute, "set volume to 40"), brightness, screenshot, lock, show desktop,
+window and tab controls, play/pause, "open Spotify", and the time and date. Typed ones
+never reach Gemini at all (no tokens); spoken ones in Gemini Live run the moment Gemini
+starts answering, instead of waiting for its tool call. Anything longer or less clear goes to
+the model as usual. Switch it off in Settings › General. The phrases are in
+`System/FastCommands.py`.
+
+**Learning from corrections.** Tell Ultron how you want things done and it keeps it as a
+rule for every future conversation: "from now on, call me boss", "never read my emails out
+loud", "stop calling me sir", "forget the rule about emails". It says what it will do from
+now on, `undo` takes a rule back, and Settings › Memory › Rules lists them (Forget deletes
+one). Code: `Brain/Rules.py`.
+
+**Self-repair.** When one of Ultron's tools crashes, it can offer to fix its own code. Say
+"fix yourself" and it drafts the smallest change that stops that error. The change must
+match the file exactly and still compile, and you see it in the panel. The banner then
+asks before anything is written. A backup is kept, the file must still import (or the
+backup goes straight back), and "undo" takes the repair back. The fix applies the next time
+Ultron starts. A few files (the repair code itself, confirmations, undo, setup) are never
+changed. Backups and history: `Config/Repairs/`. Code: `System/SelfRepair.py`.
+
+**Skill Forge.** "Make yourself a skill that…" writes a new plugin into `Plugins/`. Before
+you see it, it is safety-scanned and test-run once in a separate process:
+- **Not allowed:** running programs, deleting or moving files, registry access, eval or
+  exec, reading Ultron's keys and memory.
+- **Packages:** only ones already installed; nothing is pip-installed.
+
+You get the code in the panel and a yes/no banner. After a yes it appears in Settings ›
+Plugins, and "undo" or "remove the skill X" moves it to `Config/Forge/Removed/`. Code:
+`System/SkillForge.py`.
+
+**Call secretary** (plugin, `Plugins/CallSecretary.py`). While a WhatsApp Desktop voice
+call rings, say "take this call" and Ultron takes a message:
+1. It turns its own mic off and presses Accept.
+2. It says it's your AI assistant and that the message is recorded, then plays a tone.
+3. It records until the caller stops talking.
+4. It says goodbye and presses End call.
+5. It shows you the message (written down by Gemini) and turns its mic back on.
+
+It only answers when you ask, and never a video call. A banner lets you take the call
+yourself at any point. It hears the caller through Stereo Mix, or the mic when there's no
+Stereo Mix. Settings › Plugins sets the greeting, the device, the time limit and whether
+Gemini writes the message down. "What messages did I get?" reads past notes, saved in
+`Config/CallSecretary/`.
+
 **Usage** (Settings › Usage) shows the tokens Ultron used today and over the last 14 days,
 and how often each tool ran, how often it worked and how long it took. It is counted on
 this computer from what Gemini reports, and stored in `Brain/Usage.json` (git-ignored).

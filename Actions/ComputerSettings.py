@@ -116,8 +116,18 @@ def WinEndpointVolume():
     number from decibels.
     """
     from ctypes import cast, POINTER
+    import comtypes
     from comtypes import CLSCTX_ALL
     from pycaw.pycaw import AudioUtilities, IAudioEndpointVolume
+
+    # Tools run on worker threads, and COM must be started on each thread
+    # that uses it. Without this every call from a tool failed with
+    # "CoInitialize has not been called": volume_set fell back to pressing
+    # mute twice (so the level never changed) and nothing could be read back.
+    try:
+        comtypes.CoInitialize()
+    except OSError:
+        pass                                    # already started on this thread
 
     speakers = AudioUtilities.GetSpeakers()
     endpoint = getattr(speakers, "EndpointVolume", None)

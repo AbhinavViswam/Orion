@@ -163,7 +163,8 @@ class ActionRegistry:
         except Exception as e:
             self._logger(f"Action '{name}' crashed during run(): {e}")
             traceback.print_exc()
-            return f"Tool '{name}' failed: {e}"
+            from System import SelfRepair
+            return f"Tool '{name}' failed: {e}" + SelfRepair.NoteFailure(name, traceback.format_exc())
 
 
 def CallHandler(fn: Callable, parameters: dict, ctx: dict) -> str:

@@ -3616,6 +3616,7 @@ class LookPage(QWidget):
 _MEMORY_GROUPS = (
     ("identity", "About you"), ("preferences", "Preferences"), ("projects", "Projects"),
     ("relationships", "People"), ("wishes", "Wishes"), ("notes", "Notes"),
+    ("rules", "Rules"),       # corrections it keeps following (Brain/Rules.py)
 )
 _MEMORY_SHOWN = 150          # rows drawn at once; search narrows the rest
 
@@ -3668,7 +3669,8 @@ class MemoryPage(QWidget):
         a.addWidget(_Caption("Teach it something"))
         self._add_cat = _Dropdown()
         for key, label in _MEMORY_GROUPS:
-            self._add_cat.addItem(label, key)
+            if key != "rules":            # rules are taught by talking, not typed as facts
+                self._add_cat.addItem(label, key)
         self._add_cat.setCurrentIndex(self._add_cat.findData("notes"))
         self._add_key = _Input("", "About what, e.g. favourite coffee")
         self._add_val = _Input("", "What to remember, e.g. flat white, no sugar")
@@ -3869,7 +3871,7 @@ class PluginsPage(QWidget):
             if p.get("valid"):
                 sw = ToggleSwitch(bool(p.get("enabled")))
                 sw.toggled.connect(lambda on, n=p["name"]: self.SetEnabled(n, on))
-                c.addWidget(_SettingRow(label, p.get("description") or "", sw))
+                c.addWidget(_SettingRow(label, p.get("brief") or p.get("description") or "", sw))
             else:
                 tag = _Text("Broken", 8, C.RED, QFont.Weight.DemiBold)
                 why = f"{p.get('file', '')}: {p.get('error', '')}".strip(": ")
@@ -4221,6 +4223,7 @@ class MainWindow(QMainWindow):
     _video_open_sig  = pyqtSignal(str, str, bool, str)  # video, title, muted, audio
     _video_close_sig = pyqtSignal()
     _video_mute_sig  = pyqtSignal(bool)
+    _mic_mute_sig    = pyqtSignal(bool, str)   # (muted, note): plugins closing the mic, e.g. during a call
     _clipboard_sig  = pyqtSignal(str)        # clipboard text changed (thread-safe)
     _confirm_sig    = pyqtSignal(str, str)   # (title, detail) — irreversible-action gate
     _confirm_hide_sig = pyqtSignal()
@@ -4499,6 +4502,7 @@ class MainWindow(QMainWindow):
         self._video_open_sig.connect(self.OnVideoOpen)
         self._video_close_sig.connect(self.OnVideoClose)
         self._video_mute_sig.connect(self.OnVideoMute)
+        self._mic_mute_sig.connect(self.SetMuted)
         self._clipboard_sig.connect(self.ShowClipboardPanel)
         self._quiz_sig.connect(self._ShowQuiz)
         self._quiz_hide_sig.connect(self._HideQuiz)
@@ -6350,6 +6354,11 @@ class MainWindow(QMainWindow):
         brief.toggled.connect(lambda on: self.ToggleBrief() if on != GetBriefEnabled() else None)
         c.addWidget(_SettingRow("Morning brief", "A short summary of your day when you first start "
                                 "talking in the morning.", brief))
+        from Brain.Settings import GetFastCommandsEnabled, SaveFastCommandsEnabled
+        fast = ToggleSwitch(GetFastCommandsEnabled())
+        fast.toggled.connect(SaveFastCommandsEnabled)
+        c.addWidget(_SettingRow("Fast commands", "Volume, mute, screenshot, lock, open an app, the time: "
+                                "done at once on this computer. Typed ones never reach the model.", fast))
         lay.addWidget(card)
 
         card, c = _Card()
@@ -6813,6 +6822,11 @@ class UltronUI:
     def StopVideo(self) -> None:
         """Thread-safe: close the video and give the HUD back to the reactor."""
         self._win._video_close_sig.emit()
+
+    def SetMicMuted(self, muted: bool, note: str = "") -> None:
+        """Thread-safe: turn Ultron's own microphone off or on (the call
+        secretary closes it while it is on a call)."""
+        self._win._mic_mute_sig.emit(bool(muted), str(note or ""))
 
     def SetVideoMuted(self, muted: bool) -> None:
         """Thread-safe: silence or unsilence whatever is playing."""

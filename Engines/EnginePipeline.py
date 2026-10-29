@@ -163,6 +163,7 @@ class PipelineEngine:
         # on, so push-to-talk keeps behaving exactly as it does today.
         self.auto_turn = False
         self._on_turn_end = None          # set by Main.py: what to do on a flush
+        self.fast_path = None             # set by Main.py: async (text) -> reply or None
         self._vad_floor = _VAD_ABSOLUTE_MIN
         self._vad_speech_ms = 0.0
         self._vad_quiet_ms = 0.0
@@ -781,6 +782,20 @@ class PipelineEngine:
             # It also clears Main.py's stall watchdog immediately, so a local
             # model taking its time never looks like a dead connection.
             await self.Emit(Msg.Heard(text))
+            # A fast command (volume, mute, open an app...) is done by the app
+            # itself: no model, no tokens. Its short reply is spoken here.
+            fast = getattr(self, "fast_path", None)
+            if fast is not None:
+                try:
+                    reply = await fast(text)
+                except Exception as e:
+                    print(f"[Pipeline] fast command failed: {e}")
+                    reply = None
+                if reply is not None:
+                    await self.Emit(Msg.said(reply))
+                    await self._Speak(reply)
+                    await self.Emit(Msg.TurnEnd())
+                    return text
             await self.send_client_content(
                 turns={"role": "user", "parts": [{"text": text}]})
         return text

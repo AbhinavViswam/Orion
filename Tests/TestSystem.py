@@ -59,7 +59,8 @@ class TestPlugins(unittest.TestCase):
 
     def TestTemplateIsSkipped(self):
         reg = PluginLoader.DiscoverPlugins(ROOT / "Plugins", set(), logger=_Quiet)
-        self.assertEqual(reg.GetToolDeclarations(), [])
+        self.assertFalse(reg.has("my_plugin"))
+        self.assertNotIn("_Template.py", {r["file"] for r in reg.ListForUi()})
 
     def TestACopiedTemplateLoads(self):
         (self.tmp / "MyPlugin.py").write_text(self._Template("my_test_plugin"), encoding="utf-8")

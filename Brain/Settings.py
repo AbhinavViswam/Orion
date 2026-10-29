@@ -229,6 +229,16 @@ def SaveFlag(key: str, value) -> None:
     CONFIG_FILE.write_text(json.dumps(data, indent=4), encoding="utf-8")
 
 
+def GetFastCommandsEnabled() -> bool:
+    """Everyday commands (volume, mute, screenshot, open an app, the time) run
+    on this computer at once instead of waiting for the model. On by default."""
+    return bool(LoadApiKeys().get("fast_commands_enabled", True))
+
+
+def SaveFastCommandsEnabled(enabled: bool) -> None:
+    SaveFlag("fast_commands_enabled", bool(enabled))
+
+
 def GetBriefEnabled() -> bool:
     return LoadApiKeys().get("morning_brief_enabled", True)
 

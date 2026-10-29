@@ -82,6 +82,7 @@ class PluginRegistry:
         # the user has to know about are sent to it. Defaults to dropping them,
         # which keeps every existing single-sink caller working unchanged.
         self._notify = notify or (lambda _msg: None)
+        self.reserved: set[str] = set()      # core tool names a plugin may not take
 
     # -- called by Main.py at LiveConnectConfig build time --
     def GetToolDeclarations(self) -> list[dict]:
@@ -126,7 +127,30 @@ class PluginRegistry:
             self._logger(f"Plugin '{name}' crashed during run(): {e}")
             self._notify(f"Plugin '{name}' failed — see the console for details.")
             traceback.print_exc()
-            return f"Sir, the '{name}' plugin failed: {e}"
+            from System import SelfRepair
+            return f"Sir, the '{name}' plugin failed: {e}" + SelfRepair.NoteFailure(name, traceback.format_exc())
+
+    # -- called by System/SkillForge.py: a plugin added or removed while running --
+    def Add(self, path: Path) -> PluginRecord:
+        """Load one plugin file into the running registry (replacing an older
+        copy of the same file). The session must reconnect for the model to see it."""
+        rec = LoadFile(path, path.parent, self.reserved, self._plugins)
+        self._all_records = [r for r in self._all_records if r.file != rec.file] + [rec]
+        if rec.valid:
+            self._plugins[rec.name] = rec
+            self._logger(f"Plugin added: {rec.name} ({path.name})")
+        return rec
+
+    def Drop(self, name: str) -> bool:
+        rec = self._plugins.pop(name, None)
+        if rec is None:
+            return False
+        self._all_records = [r for r in self._all_records if r.file != rec.file]
+        sys.modules.pop(f"Plugins.{Path(rec.file).stem}", None)
+        return True
+
+    def Names(self) -> set[str]:
+        return set(self._plugins)
 
     # -- called by ui.py's settings tab to render per-plugin config forms --
     def SettingsSchemas(self) -> list[dict]:
@@ -161,6 +185,7 @@ class PluginRegistry:
             out.append({
                 "name": rec.name,
                 "description": rec.description,
+                "brief": rec.brief or "",          # the short line, for the settings list
                 "file": rec.file,
                 "valid": rec.valid,
                 "error": rec.error,
@@ -285,6 +310,39 @@ def LoadError(path: Path, plugins_dir: Path, exc: Exception) -> str:
     return f"Failed to load: {exc}"
 
 
+def LoadFile(path: Path, plugins_dir: Path, core_tool_names: set[str],
+             taken: dict[str, PluginRecord] | None = None) -> PluginRecord:
+    """Import and validate one plugin file. Never raises."""
+    taken = taken or {}
+    try:
+        module_name = f"Plugins.{path.stem}"
+        spec = importlib.util.spec_from_file_location(module_name, path)
+        if spec is None or spec.loader is None:
+            raise ImportError("could not build import spec")
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[module_name] = module
+        try:
+            spec.loader.exec_module(module)
+        except Exception:
+            sys.modules.pop(module_name, None)
+            raise
+
+        rec = Validate(module, path.name)
+
+        if rec.valid and rec.name in core_tool_names:
+            rec = PluginRecord(name=rec.name, file=path.name,
+                                error=f"Name '{rec.name}' collides with a core tool — rejected.")
+        elif rec.valid and rec.name in taken and taken[rec.name].file != path.name:
+            other = taken[rec.name].file
+            rec = PluginRecord(name=rec.name, file=path.name,
+                                error=f"Name '{rec.name}' already used by plugin '{other}' — rejected.")
+    except Exception as e:
+        rec = PluginRecord(name=path.stem, file=path.name,
+                            error=LoadError(path, plugins_dir, e))
+        traceback.print_exc()
+    return rec
+
+
 def DiscoverPlugins(plugins_dir: Path, core_tool_names: set[str],
                       logger: Callable[[str], None] = print,
                       notify: Callable[[str], None] | None = None) -> PluginRegistry:
@@ -303,34 +361,7 @@ def DiscoverPlugins(plugins_dir: Path, core_tool_names: set[str],
     for path in files:
         if path.name.startswith("_"):
             continue
-        try:
-            module_name = f"Plugins.{path.stem}"
-            spec = importlib.util.spec_from_file_location(module_name, path)
-            if spec is None or spec.loader is None:
-                raise ImportError("could not build import spec")
-            module = importlib.util.module_from_spec(spec)
-            sys.modules[module_name] = module
-            try:
-                spec.loader.exec_module(module)
-            except Exception:
-                sys.modules.pop(module_name, None)
-                raise
-
-            rec = Validate(module, path.name)
-
-            if rec.valid and rec.name in core_tool_names:
-                rec = PluginRecord(name=rec.name, file=path.name,
-                                    error=f"Name '{rec.name}' collides with a core tool — rejected.")
-            elif rec.valid and rec.name in valid:
-                other = valid[rec.name].file
-                rec = PluginRecord(name=rec.name, file=path.name,
-                                    error=f"Name '{rec.name}' already used by plugin '{other}' — rejected.")
-
-        except Exception as e:
-            rec = PluginRecord(name=path.stem, file=path.name,
-                                error=LoadError(path, plugins_dir, e))
-            traceback.print_exc()
-
+        rec = LoadFile(path, plugins_dir, core_tool_names, valid)
         all_records.append(rec)
         if rec.valid:
             valid[rec.name] = rec
@@ -341,6 +372,7 @@ def DiscoverPlugins(plugins_dir: Path, core_tool_names: set[str],
     notify = notify or (lambda _msg: None)
     registry = PluginRegistry(valid, logger, notify)
     registry._all_records = all_records
+    registry.reserved = set(core_tool_names)
     rejected = len(all_records) - len(valid)
     logger(f"Plugin discovery complete: {len(valid)} active, "
            f"{rejected} rejected, {len(all_records)} total.")

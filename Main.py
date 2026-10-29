@@ -66,6 +66,8 @@ from Actions.SystemMonitor import SystemMonitor, GetSystemStatus
 from Actions.Proactive import ProactiveEngine
 from Actions.BackgroundMonitor import AddMonitor, RemoveMonitor, ListMonitors, CheckAll as monitor_check_all
 from Actions.WebSearch import News as _fetch_news_sync
+from System import FastCommands, SelfRepair, SkillForge
+from Brain.Settings import GetFastCommandsEnabled
 from Brain.Settings import GetBriefEnabled, GetMediaResolution, GetProactiveAudioEnabled, GetPushToTalkEnabled, GetThinkingEnabled, GetTurnTuning, GetVoice, GetInputDevice, GetOutputDevice
 from Brain import Gemini as _gemini
 from System.PluginLoader import DiscoverPlugins
@@ -410,6 +412,27 @@ TOOL_DECLARATIONS = [
         }
     },
     {
+        "name": "learn_rule",
+        "description": (
+            "Keeps a STANDING RULE for how you behave. Use when the user corrects how you do "
+            "something, or says from now on / always / never / next time / stop doing: 'from now "
+            "on call me boss', 'never read my emails aloud', 'stop saying sir', 'next time ask "
+            "before closing apps'. Also to forget one: rule empty, replaces = the old rule. Do NOT "
+            "use for facts about the user (save_memory) or one-off requests. Not silent: say in "
+            "one short sentence what you will do from now on."
+        ),
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "rule": {"type": "STRING", "description": (
+                    "The rule as an instruction to yourself, in English, short: 'Call the user "
+                    "boss.' Empty to only forget one.")},
+                "replaces": {"type": "STRING", "description": (
+                    "An existing rule this one changes or removes, in its words from [YOUR RULES].")},
+            },
+        }
+    },
+    {
         "name": "recall_memory",
         "description": (
             "Look up a fact you have stored about the user but which is NOT in "
@@ -462,6 +485,8 @@ TOOL_DECLARATIONS = [
         },
     },
 ]
+# Self-repair and Skill Forge describe their own tools (System/SelfRepair.py, System/SkillForge.py).
+TOOL_DECLARATIONS += [SelfRepair.TOOL, SkillForge.TOOL]
 
 class _ReconnectSignal(Exception):
     """Raised inside the session TaskGroup to force a clean, voluntary reconnect
@@ -520,6 +545,12 @@ class UltronLive:
         self._vision_last_time     = 0.0     # monotonic time of last screen_process call (cooldown guard)
         self._vision_busy          = False   # True while a vision capture/inject cycle is in flight
         self._interrupted          = False   # True while draining audio after user interrupt
+        # Fast commands (System/FastCommands.py). Per Gemini Live turn: None
+        # until the user's words have been checked, then "" (not a command) or
+        # the reply of the command already run, so the model's own tool call
+        # for it is answered without running it a second time.
+        self._fast_turn: str | None = None
+        self._fast_n               = 0
         # Which engine is holding the conversation, and what it can do.
         # None means Gemini Live — the default and, unless somebody has gone to
         # the providers settings and chosen otherwise, always the case. Every
@@ -620,6 +651,11 @@ class UltronLive:
                 self.SetPushToTalk(True)
             except Exception as e:
                 print(f"[ULTRON] ⚠ Push-to-talk unavailable: {e}")
+
+    def OnSkillsChanged(self) -> None:
+        """A forged skill was added or removed. Reconnect so the model's tool
+        list matches, after a moment so it can say so first."""
+        threading.Timer(4.0, lambda: self.RequestReconnect(keep_context=True, reason="new skill list")).start()
 
     def PluginSay(self, instruction: str) -> None:
         """
@@ -733,15 +769,67 @@ class UltronLive:
         raise _ReconnectSignal(keep_context=keep)
 
     def OnTextCommand(self, text: str):
-        if not self._loop or not self.session:
+        if not self._loop:
             return
-        asyncio.run_coroutine_threadsafe(
-            self.session.send_client_content(
+        asyncio.run_coroutine_threadsafe(self.TypedCommand(text), self._loop)
+
+    async def TypedCommand(self, text: str) -> None:
+        """Something typed in the box: a fast command runs here and now, with
+        no model and no tokens; anything else goes to the conversation."""
+        try:
+            reply = await self.RunFastCommand(text)
+        except Exception as e:
+            print(f"[ULTRON] fast command failed: {e}")
+            reply = None
+        if reply is not None:
+            self.ui.WriteLog(f"{self._asst_name}: {reply}")
+            self._session_log.append(f"User: {text}")
+            self._session_log.append(f"{self._asst_name}: {reply}")
+            return
+        if self.session:
+            await self.session.send_client_content(
                 turns={"role": "user", "parts": [{"text": text}]},
-                turn_complete=True
-            ),
-            self._loop
-        )
+                turn_complete=True)
+
+    async def RunFastCommand(self, text: str, live: bool = False) -> str | None:
+        """Run `text` as a fast command if it is one, and return what to say;
+        None when it is not (or fast commands are switched off).
+
+        The tool runs through ExecuteTool like any of the model's calls, so undo,
+        confirmations and Settings > Usage all see it. `live`: the words came
+        from Gemini Live's own transcript, where the model is answering anyway,
+        so only commands that DO something are worth taking over."""
+        if not GetFastCommandsEnabled():
+            return None
+        m = FastCommands.Find(text, (self._asst_name.lower(), "ultron"))
+        if m is None or (live and m.tool is None):
+            return None
+        result = ""
+        if m.tool:
+            self._fast_n += 1
+            fc = types.FunctionCall(id=f"fast-{self._fast_n}", name=m.tool, args=dict(m.args))
+            fr = await self.ExecuteTool(fc)
+            result = str((fr.response or {}).get("result", ""))
+        reply = m.reply(result)
+        print(f"[ULTRON] fast command: {m.label or text} -> {reply}")
+        return reply
+
+    async def CheckFastTurn(self, heard: str) -> None:
+        """Gemini Live: the model has started answering, so the user's turn is
+        over. If what they said is a fast command, run it now rather than
+        waiting for the model to get round to its tool call."""
+        if self._fast_turn is not None or self._engine is not None or self._interrupted:
+            return
+        self._fast_turn = ""
+        if not heard.strip():
+            return
+        try:
+            reply = await self.RunFastCommand(heard, live=True)
+        except Exception as e:
+            print(f"[ULTRON] fast command failed: {e}")
+            reply = None
+        if reply is not None:
+            self._fast_turn = reply
 
     def TailActive(self) -> bool:
         """True while the speakers may still be finishing our last sentence."""
@@ -959,6 +1047,11 @@ class UltronLive:
         parts = [time_ctx, identity_ctx]
         if mem_str:
             parts.append(mem_str)
+        # Corrections the user taught, as standing rules (Brain/Rules.py).
+        from Brain import Rules
+        _rules = Rules.PromptBlock(memory)
+        if _rules:
+            parts.append(_rules)
         parts.append(sys_prompt)
 
         cfg = dict(
@@ -1103,7 +1196,12 @@ class UltronLive:
         result = "Done."
 
         try:
-            if name == "recall_memory":
+            if name == "learn_rule":
+                from Brain import Rules
+                result = Rules.Learn(str(args.get("rule", "") or ""), str(args.get("replaces", "") or ""))
+                print(f"[Rules] {result[:100]}")
+
+            elif name == "recall_memory":
                 # Local file search: no network, no second model. Kept out of
                 # the executor deliberately — it is a dictionary scan over a few
                 # hundred short strings, and a thread hop would cost more than
@@ -1193,6 +1291,13 @@ class UltronLive:
                     _os._exit(0)
                 asyncio.create_task(_do_shutdown())
 
+            elif name == "self_repair":
+                result = SelfRepair.Run(args, show=self.ui.ShowContent, say=self.PluginSay)
+
+            elif name == "skill_forge":
+                result = SkillForge.Run(args, self._plugin_registry, show=self.ui.ShowContent,
+                                        say=self.PluginSay, after=self.OnSkillsChanged)
+
             elif self._action_registry.has(name):
                 # file_processor: fall back to the currently-uploaded file when none is given
                 if name == "file_processor" and not args.get("file_path") and self.ui.CurrentFile:
@@ -1224,7 +1329,7 @@ class UltronLive:
                     result = f"Unknown tool: {name}"
 
         except Exception as e:
-            result = f"Tool '{name}' failed: {e}"
+            result = f"Tool '{name}' failed: {e}" + SelfRepair.NoteFailure(name, traceback.format_exc())
             traceback.print_exc()
             self.SpeakError(name, e)
 
@@ -1468,6 +1573,15 @@ class UltronLive:
                                 print("[ULTRON] 🔗 Session resumption armed")
                             self._resume_handle = _sru.new_handle
 
+                    # The model answering (sound, words or a tool call) means
+                    # the user's turn is over: the moment to check for a fast
+                    # command, once per turn.
+                    if self._fast_turn is None and in_buf and (
+                            response.data or response.tool_call or (
+                                response.server_content and response.server_content.output_transcription
+                                and response.server_content.output_transcription.text)):
+                        await self.CheckFastTurn(" ".join(in_buf))
+
                     if response.data:
                         if self._interrupted:
                             pass  # discard: interrupted
@@ -1505,6 +1619,7 @@ class UltronLive:
                         if sc.turn_complete:
                             if self._turn_done_event:
                                 self._turn_done_event.set()
+                            self._fast_turn = None
 
                             # If this turn_complete ends an interrupted response, clear the
                             # flag and skip all further processing for that turn.
@@ -1547,6 +1662,16 @@ class UltronLive:
                         fn_responses = []
                         for fc in response.tool_call.function_calls:
                             print(f"[ULTRON] 📞 {fc.name}")
+                            if self._fast_turn:
+                                # Already done by the fast path this turn: say
+                                # so instead of doing it twice.
+                                fn_responses.append(types.FunctionResponse(
+                                    id=fc.id, name=fc.name, response={"result": (
+                                        f"status=done already_handled=true -- {self._fast_turn} "
+                                        "This was already done on the user's computer the moment "
+                                        "they asked. Do not do it again and do not call another "
+                                        "tool for it; confirm in two or three words.")}))
+                                continue
                             fr = await self.ExecuteTool(fc)
                             fn_responses.append(fr)
                         await self.session.send_tool_response(
@@ -2068,6 +2193,9 @@ class UltronLive:
         # engine finds it in the audio. With push-to-talk the key release is the
         # signal and the detector stays out of the way.
         engine.auto_turn = not self._ptt_enabled
+        # My own setup: what was heard is checked for a fast command before it
+        # reaches the language model, so those cost nothing and answer at once.
+        engine.fast_path = self.RunFastCommand
         self._engine = engine
         try:
             yield engine
