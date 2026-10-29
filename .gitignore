@@ -1,0 +1,92 @@
+# ── ULTRON V2 — what never belongs in the repository ──────────────────────────
+# Everything listed here is created by the app on first run, or holds secrets.
+# A fresh clone with none of it boots straight to the setup screen.
+#
+# NOTE: git only treats "#" as a comment at the START of a line. A comment after
+# a pattern on the same line becomes part of the pattern, and the file is then
+# NOT ignored — so every comment below sits on its own line.
+
+# ── Secrets. Committing any of these publishes them. ──────────────────────────
+# Gemini API key, provider keys, per-plugin credentials, user name and settings
+Config/ApiKeys.json
+Config/*.json
+!Config/__init__.py
+# TLS private keys and certificates
+Config/certs/
+*.key
+*.pem
+*.crt
+*.p12
+*.pfx
+# A linked WhatsApp session: committing it hands somebody your WhatsApp account
+Config/whatsapp_web/
+# Google OAuth tokens and client secrets (Gmail / Calendar plugins)
+**/token*.json
+**/client_secret*.json
+*credentials*.json
+*secret*.json
+service_account*.json
+# Environment files with keys
+.env
+.env.*
+*.env
+# Any other file named like it holds a key or password
+*api_key*
+*apikey*
+*ApiKey*
+*ApiKeys*
+*password*
+*.secret
+
+# ── Personal data the assistant keeps about you ───────────────────────────────
+# Long-term memory (facts about you, session summaries)
+Brain/LongTerm.json
+Brain/*.json
+Brain/*.db
+*.sqlite
+*.sqlite3
+# Uploaded files
+uploads/
+# Call notes, transcripts and recordings
+*.wav
+*.mp3
+*.m4a
+recordings/
+call_notes*.json
+
+# ── Downloaded models (large, re-downloaded on demand) ────────────────────────
+Engines/Voices/
+models/
+*.onnx
+*.tflite
+*.bin
+
+# ── Python build noise ────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# ── Virtual environments ──────────────────────────────────────────────────────
+.venv/
+venv/
+env/
+ENV/
+
+# ── Editors and operating systems ─────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ── Runtime output ────────────────────────────────────────────────────────────
+*.log
+logs/
+downloads/
+screenshots/
