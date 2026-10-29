@@ -866,17 +866,30 @@ class OrionLive:
             if self._ptt is not None:
                 self._ptt.stop()
                 self._ptt = None
+            # Back to the open mic: unmute and drop the "HOLD ..." label.
+            try:
+                self.ui.SetHoldHint("")
+                self.ui.SetMicMuted(False, "Hold to speak off.")
+            except Exception:
+                pass
             return "off"
 
         if self._ptt is None:
             self._ptt = PushToTalk(self.OnPtt)
         scope = self._ptt.start()
+        # Hold to speak: muted is the resting state. The mic is really closed
+        # (not just ignored) until the keys go down.
+        try:
+            self.ui.SetHoldHint(self._ptt.label)
+            self.ui.SetMicHeld(True)
+        except Exception:
+            pass
         # A window-scoped chord is a real limitation, not a detail — say it once
         # in the log so nobody wonders why it does nothing while another app is
         # focused. Reporting it must never be able to undo the thing it reports.
         try:
             self.ui.WriteLog(
-                f"SYS: Push-to-talk on — hold {self._ptt.label}"
+                f"SYS: Hold to speak on — Orion stays muted, hold {self._ptt.label} to talk"
                 + ("." if scope == "global"
                    else " (works while this window is focused)."))
         except Exception:
@@ -886,23 +899,31 @@ class OrionLive:
     def OnPtt(self, held: bool) -> None:
         """Chord pressed or released — may arrive on the hotkey thread."""
         self._ptt_held = held
-        # Releasing the key ends the turn. On Live the server works that out from
-        # the audio; a local pipeline has no server, so the release IS the
-        # signal — which is also why it is the more reliable of the two ways to
-        # talk to one. Scheduled onto the loop because this may arrive on the
-        # hotkey thread.
-        if not held and self._engine is not None and self._loop is not None:
+        # Keys down = unmute, keys up = mute again. Quiet: no log line per press.
+        try:
+            self.ui.SetMicHeld(not held)
+        except Exception:
+            pass
+        if held or self._loop is None:
+            return
+        # Releasing the key ends the turn. A local pipeline is told directly.
+        # Live is told the audio stream ended, so it answers straight away
+        # instead of waiting for silence that will never arrive (the mic is
+        # closed now). The marker goes through the same queue as the audio so
+        # it lands after the last chunk. Scheduled onto the loop because this
+        # may arrive on the hotkey thread.
+        if self._engine is not None:
             try:
                 asyncio.run_coroutine_threadsafe(
                     self._engine.FlushMicrophone(SEND_SAMPLE_RATE), self._loop)
             except Exception as e:
                 print(f"[ORION] PTT flush failed: {e}")
-        try:
-            # Releasing the key does not mean the assistant went to sleep: it
-            # is still listening for the next press.
-            self.ui.SetState("LISTENING")
-        except Exception:
-            pass
+        elif self.out_queue is not None:
+            try:
+                self._loop.call_soon_threadsafe(
+                    self.out_queue.put_nowait, {"stream_end": True})
+            except Exception as e:
+                print(f"[ORION] PTT stream end failed: {e}")
 
     def interrupt(self) -> None:
         """Stop ORION mid-speech: drain queued audio and open mic immediately."""
@@ -1356,6 +1377,13 @@ class OrionLive:
     async def _SendRealtime(self):
         while True:
             msg = await self.out_queue.get()
+            if msg.get("stream_end"):
+                # Hold to speak released: the user is done talking.
+                try:
+                    await self.session.send_realtime_input(audio_stream_end=True)
+                except Exception as e:
+                    print(f"[ORION] audio_stream_end failed: {e}")
+                continue
             # Gemini 3.x Live rejects the old realtime_input.media_chunks field
             # (what `media=...` maps to) and closes the socket with a 1007. Send
             # mic / phone PCM through the new `audio` field instead. Queue items
@@ -1413,13 +1441,8 @@ class OrionLive:
             elif self._echo._hist:
                 self._echo.reset()
 
-            # ── Push-to-talk ─────────────────────────────────────────────────
-            # When it is on the microphone is closed by default and the chord
-            # opens it, which is the whole point: nothing leaves the machine
-            # unless you are holding the key.
-            if self._ptt_enabled and not self._ptt_held:
-                return
-            
+            # Hold to speak works through mute itself: the chord unmutes and
+            # releasing it mutes, so the check below covers it.
             if not self.ui.muted:
                 data = indata.tobytes()
                 loop.call_soon_threadsafe(
@@ -1485,7 +1508,9 @@ class OrionLive:
                         _mic_stream = OpenAny()
                         _mic_stream.start()
                         print("[ORION] 🎤 Mic stream open")
-                    await asyncio.sleep(0.1)
+                    # Check faster in hold-to-speak so the first word after the
+                    # keys go down is not clipped.
+                    await asyncio.sleep(0.02 if self._ptt_enabled else 0.1)
             finally:
                 if _mic_stream is not None:
                     try:

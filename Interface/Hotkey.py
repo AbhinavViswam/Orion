@@ -36,26 +36,35 @@ from typing import Callable
 
 _OS = platform.system()
 
-# The default chord. Ctrl+Space is free in most desktop environments and is the
-# same finger shape on every keyboard layout, which matters for a worldwide app.
-DEFAULT_CHORD = ("ctrl", "space")
+# The hold-to-speak key: Right Ctrl on its own. The watcher reads keys without
+# blocking them, so the focused app still sees the key too. Ctrl alone does
+# nothing in almost every app, unlike Ctrl+Space (autocomplete, input language).
+DEFAULT_CHORD = ("rctrl",)
 
 # Windows virtual-key codes for the names we accept.
 _VK = {
-    "ctrl": 0x11, "shift": 0x10, "alt": 0x12,
+    "ctrl": 0x11, "shift": 0x10, "alt": 0x12, "rctrl": 0xA3,
     "space": 0x20, "f8": 0x77, "f9": 0x78, "f10": 0x79,
     "capslock": 0x14, "insert": 0x2D,
 }
 
+# Keys that never count as "another key pressed": mouse buttons and the Ctrl
+# codes themselves (Windows reports Right Ctrl as 0x11 and 0xA3 both).
+_IGNORE_VK = {0x01, 0x02, 0x04, 0x05, 0x06, 0x11, 0xA2, 0xA3}
+
 # Qt key sequence text for the same chord, used by the windowed fallback.
 _QT_NAME = {"ctrl": "Ctrl", "shift": "Shift", "alt": "Alt", "space": "Space",
-            "f8": "F8", "f9": "F9", "f10": "F10",
+            "rctrl": "Right Ctrl", "f8": "F8", "f9": "F9", "f10": "F10",
             "capslock": "CapsLock", "insert": "Ins"}
 
 _POLL_HZ = 30.0
 # A key has to be down this long before we call it speech. It stops a stray
 # brush of the chord from opening the microphone.
 _DEBOUNCE_S = 0.06
+# A lone modifier waits longer, so Right Ctrl+C has time to show it is a
+# shortcut before the microphone opens. Still well under a breath.
+_MODIFIER_DEBOUNCE_S = 0.2
+_MODIFIERS = {"ctrl", "rctrl", "shift", "alt"}
 
 
 def ChordLabel(chord=DEFAULT_CHORD) -> str:
@@ -149,23 +158,36 @@ class PushToTalk:
         import ctypes
         user32 = ctypes.windll.user32
         codes = [_VK[k] for k in self._chord]
+        ignore = _IGNORE_VK | set(codes)
+        others = [vk for vk in range(0x08, 0xFF) if vk not in ignore]
         period = 1.0 / _POLL_HZ
+        wait = (_MODIFIER_DEBOUNCE_S if set(self._chord) <= _MODIFIERS
+                else _DEBOUNCE_S)
         down_since = 0.0
+        # A press that turned out to be a shortcut (Right Ctrl+C...). Ignored
+        # until the key comes back up.
+        spoiled = False
 
         while not self._stop.is_set():
             try:
                 # The high bit of the return value is "currently down".
                 down = all(user32.GetAsyncKeyState(c) & 0x8000 for c in codes)
+                # Before speech starts, any other key down means a shortcut.
+                # Once talking, other keys are fine (you might type a word).
+                if down and not self._held and not spoiled:
+                    spoiled = any(user32.GetAsyncKeyState(vk) & 0x8000
+                                  for vk in others)
             except Exception:
                 break     # driver or session teardown — fall back to windowed
             now = time.monotonic()
-            if down:
+            if down and not spoiled:
                 if down_since == 0.0:
                     down_since = now
-                elif now - down_since >= _DEBOUNCE_S:
+                elif now - down_since >= wait:
                     self._SetHeld(True)
-            else:
+            elif not down:
                 down_since = 0.0
+                spoiled = False
                 self._SetHeld(False)
             self._stop.wait(period)
 

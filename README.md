@@ -51,7 +51,7 @@ To get a desktop icon, open **⚙ Setup → Create desktop shortcut**.
 | System load | The rings in the top bar (CPU, RAM, GPU) and network speed. Click them for details. |
 | Settings | ⚙ opens one window: General, Brain, Voice & audio, Look & name, Memory, Plugins, Usage, System, About. Changes save as you make them; ones the live session needs (devices, voice, Gemini options, plugins) reconnect for a moment. Only Brain's mode and background requests wait for **Save & apply**. |
 
-Push-to-talk is in Settings › General if you'd rather hold a key to speak.
+**Hold to speak** is in Settings › General: Orion stays muted and only hears you while you hold **Right Ctrl** (on its own — Right Ctrl+C and other shortcuts are ignored).
 
 **Fast commands.** Everyday commands run at once on this computer, with no model:
 volume (up, down, mute, "set volume to 40"), brightness, screenshot, lock, show desktop,

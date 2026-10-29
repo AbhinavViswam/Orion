@@ -83,8 +83,6 @@ def ReadFullConfig() -> dict:
 
 # Single source of truth for the release name — the window title, the header
 # badge and the readme must never disagree again.
-APP_VERSION  = "V2"
-APP_PROTOCOL = APP_VERSION.split()[-1]
 
 _DEFAULT_W, _DEFAULT_H = 980, 700
 _MIN_W,     _MIN_H     = 820, 580
@@ -746,8 +744,12 @@ class HudCanvas(QWidget):
 
         # status text
         sy = _sy_status
-        if self.muted:
-            txt, col = "⊘  MUTED",     Qcol(C.MUTED_C)
+        hint = getattr(self, "hold_hint", "")
+        if self.muted and not (hint and self.speaking):
+            # Hold-to-speak mode: muted is the resting state, so say how to talk.
+            # (Orion's own reply still shows as SPEAKING.)
+            txt = f"⊘  HOLD {hint.upper()}" if hint else "⊘  MUTED"
+            col = Qcol(C.MUTED_C)
         elif self.speaking:
             txt, col = "●  SPEAKING",  Qcol(C.ACC)
         elif self.state == "THINKING":
@@ -4224,6 +4226,7 @@ class MainWindow(QMainWindow):
     _video_close_sig = pyqtSignal()
     _video_mute_sig  = pyqtSignal(bool)
     _mic_mute_sig    = pyqtSignal(bool, str)   # (muted, note): plugins closing the mic, e.g. during a call
+    _mic_hold_sig    = pyqtSignal(bool)        # hold-to-speak: muted, with no log line
     _clipboard_sig  = pyqtSignal(str)        # clipboard text changed (thread-safe)
     _confirm_sig    = pyqtSignal(str, str)   # (title, detail) — irreversible-action gate
     _confirm_hide_sig = pyqtSignal()
@@ -4253,7 +4256,7 @@ class MainWindow(QMainWindow):
         if self._accent.living:
             self._accent_timer.start(self._AccentStep())
 
-        self.setWindowTitle(f"{_display} — {APP_VERSION}")
+        self.setWindowTitle(_display)
         self.setMinimumSize(_MIN_W, _MIN_H)
         self.resize(_DEFAULT_W, _DEFAULT_H)
 
@@ -4503,6 +4506,7 @@ class MainWindow(QMainWindow):
         self._video_close_sig.connect(self.OnVideoClose)
         self._video_mute_sig.connect(self.OnVideoMute)
         self._mic_mute_sig.connect(self.SetMuted)
+        self._mic_hold_sig.connect(lambda m: self.SetMuted(m, quiet=True))
         self._clipboard_sig.connect(self.ShowClipboardPanel)
         self._quiz_sig.connect(self._ShowQuiz)
         self._quiz_hide_sig.connect(self._HideQuiz)
@@ -6070,48 +6074,58 @@ class MainWindow(QMainWindow):
             try:
                 scope = self.on_push_to_talk(want)
             except Exception as e:
-                self._log.AppendLog(f"ERR: Push-to-talk failed — {e}")
+                self._log.AppendLog(f"ERR: Hold to speak failed — {e}")
                 SavePushToTalkEnabled(False)
                 want = False
         self.ApplyPttShortcut(want and scope != "global")
 
     def ApplyPttShortcut(self, needed: bool):
-        """Bind the chord inside the window when no global hook is available.
+        """Watch the hold-to-speak key inside the window when no global hook
+        is available.
 
         On macOS and Linux there is no dependency-free way to read global key
-        state, so the chord is at least live whenever this window has focus.
-        Qt gives no key-release for a QShortcut, so a press latches the mic open
-        and a short timer closes it; held down, auto-repeat keeps pushing that
-        timer out, which behaves like holding a key.
+        state, so the key is at least live whenever this window has focus. Qt
+        cannot bind a lone Ctrl as a shortcut, so this filters key press and
+        release directly. Qt does not tell left from right Ctrl there, so
+        either one works in this fallback.
         """
-        from PyQt6.QtGui import QKeySequence, QShortcut
-        from Interface.Hotkey import QtSequence
+        from PyQt6.QtCore import QEvent, QObject
+        from PyQt6.QtWidgets import QApplication
 
+        app = QApplication.instance()
         if not needed:
-            sc = getattr(self, "_ptt_sc", None)
-            if sc is not None:
-                sc.setEnabled(False)
-                self._ptt_sc = None
+            f = getattr(self, "_ptt_filter", None)
+            if f is not None and app is not None:
+                app.removeEventFilter(f)
+            self._ptt_filter = None
             self.PttHold(False)
             return
-        if getattr(self, "_ptt_sc", None) is not None:
+        if getattr(self, "_ptt_filter", None) is not None or app is None:
             return
 
-        self._ptt_release = QTimer(self)
-        self._ptt_release.setSingleShot(True)
-        self._ptt_release.setInterval(420)
-        self._ptt_release.timeout.connect(lambda: self.PttHold(False))
+        win = self
 
-        def _Press():
-            self.PttHold(True)
-            self._ptt_release.start()
+        class _CtrlFilter(QObject):
+            def eventFilter(self, obj, ev):
+                t = ev.type()
+                if t in (QEvent.Type.KeyPress, QEvent.Type.KeyRelease):
+                    if ev.key() == Qt.Key.Key_Control and not ev.isAutoRepeat():
+                        win.PttHold(t == QEvent.Type.KeyPress)
+                    elif t == QEvent.Type.KeyPress:
+                        # Another key with Ctrl down is a shortcut, not speech.
+                        win.PttHold(False)
+                return False
 
-        self._ptt_sc = QShortcut(QKeySequence(QtSequence()), self)
-        self._ptt_sc.setAutoRepeat(True)
-        self._ptt_sc.activated.connect(_Press)
+        self._ptt_filter = _CtrlFilter(self)
+        app.installEventFilter(self._ptt_filter)
 
     def PttHold(self, held: bool):
         """Report a windowed press/release to whoever owns the microphone."""
+        # Only changes count: one key event can reach several widgets.
+        held = bool(held)
+        if held == getattr(self, "_ptt_was_held", False):
+            return
+        self._ptt_was_held = held
         cb = getattr(self, "ptt_hold", None)
         if cb:
             try:
@@ -6132,7 +6146,7 @@ class MainWindow(QMainWindow):
         """Update all name/theme-dependent UI elements and persist to config."""
         self._assistant_name = name.strip() or "ORION"
         display = self._assistant_name.upper()
-        self.setWindowTitle(f"{display} — {APP_VERSION}")
+        self.setWindowTitle(display)
         self._title_lbl.setText(display)
         self._log._ai_name_lc = self._assistant_name.lower()
         self.hud._assistant_name = display
@@ -6348,8 +6362,8 @@ class MainWindow(QMainWindow):
                 self.TogglePtt()
             ptt.setChecked(GetPushToTalkEnabled())
         ptt.toggled.connect(_Ptt)
-        c.addWidget(_SettingRow("Push-to-talk", f"Hold {ChordLabel()} to talk. The microphone stays "
-                                "closed the rest of the time.", ptt))
+        c.addWidget(_SettingRow("Hold to speak", f"Orion stays muted. Hold {ChordLabel()} while you talk, "
+                                "let go and it mutes again.", ptt))
         brief = ToggleSwitch(GetBriefEnabled())
         brief.toggled.connect(lambda on: self.ToggleBrief() if on != GetBriefEnabled() else None)
         c.addWidget(_SettingRow("Morning brief", "A short summary of your day when you first start "
@@ -6420,7 +6434,6 @@ class MainWindow(QMainWindow):
         lay.setSpacing(14)
         card, c = _Card()
         c.addWidget(_Text(self._assistant_name.upper(), 20, C.WHITE, QFont.Weight.Light))
-        c.addWidget(_Text(f"Version {APP_VERSION}", 9, C.TEXT_DIM))
         c.addWidget(_Text("Made by Abhinav Viswam", 10, C.TEXT))
         c.addWidget(_Text("A voice assistant for your computer. It talks with you in real time, "
                           "and can use your apps, files, the web and your screen.", 9,
@@ -6430,7 +6443,7 @@ class MainWindow(QMainWindow):
         card, c = _Card()
         c.addWidget(_Caption("Shortcuts"))
         for k, v in (("F4", "Mute or unmute"), ("Esc", "Stop talking, or close a panel"),
-                     ("F11", "Full screen"), (ChordLabel(), "Hold to talk (when push-to-talk is on)")):
+                     ("F11", "Full screen"), (ChordLabel(), "Talk while held (Hold to speak mode)")):
             row = QHBoxLayout()
             key = _Text(k, 10, C.WHITE, QFont.Weight.DemiBold)
             key.setFixedWidth(110)
@@ -6543,7 +6556,7 @@ class MainWindow(QMainWindow):
         self._video_auto_muted = False
         self.SetMuted(not self._muted)
 
-    def SetMuted(self, muted: bool, note: str = ""):
+    def SetMuted(self, muted: bool, note: str = "", quiet: bool = False):
         muted = bool(muted)
         if muted == self._muted:
             return
@@ -6552,10 +6565,12 @@ class MainWindow(QMainWindow):
         self.StyleMuteBtn()
         if muted:
             self.ApplyState("MUTED")
-            self._log.AppendLog("SYS: Microphone muted." + (f" {note}" if note else ""))
+            if not quiet:
+                self._log.AppendLog("SYS: Microphone muted." + (f" {note}" if note else ""))
         else:
             self.ApplyState("LISTENING")
-            self._log.AppendLog("SYS: Microphone active." + (f" {note}" if note else ""))
+            if not quiet:
+                self._log.AppendLog("SYS: Microphone active." + (f" {note}" if note else ""))
 
     def StyleMuteBtn(self):
         if self._muted:
@@ -6837,6 +6852,16 @@ class OrionUI:
         """Thread-safe: turn Orion's own microphone off or on (the call
         secretary closes it while it is on a call)."""
         self._win._mic_mute_sig.emit(bool(muted), str(note or ""))
+
+    def SetMicHeld(self, muted: bool) -> None:
+        """Thread-safe: hold-to-speak opening or closing the mic, without a
+        log line every time the keys go down or up."""
+        self._win._mic_hold_sig.emit(bool(muted))
+
+    def SetHoldHint(self, chord: str) -> None:
+        """Show 'HOLD <chord>' on the HUD while muted ('' puts back 'MUTED')."""
+        self._win.hud.hold_hint = str(chord or "")
+        self._win.hud.update()
 
     def SetVideoMuted(self, muted: bool) -> None:
         """Thread-safe: silence or unsilence whatever is playing."""
