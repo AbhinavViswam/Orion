@@ -144,14 +144,17 @@ class Reactor(_BaseReactor):
 
     # ── rendering ─────────────────────────────────────────────────────────────
 
-    def render(self, size: int, tint: QColor) -> tuple[QImage, QImage]:
+    def render(self, size: int, tint: QColor, tint2: QColor | None = None,
+               mix: float = 0.18) -> tuple[QImage, QImage]:
         S = int(max(32, size))
         t = self._sim
         k = self.k
         alpha = float(k[_IDX["alpha"]])
         grey = float(k[_IDX["grey"]])
-        col = _ICE * (1 - 0.18) + _Rgb(tint) * 0.18
+        col = _ICE * (1 - mix) + _Rgb(tint) * mix
         col = col * (1 - grey) + _GREY * grey
+        # A gradient accent: the crisp light in the first colour, the glow in the second.
+        col2 = col if tint2 is None else (_ICE * (1 - mix) + _Rgb(tint2) * mix) * (1 - grey) + _GREY * grey
         charge = 0.2 * self.level
         # The breath: a slow swell in and out, plus the voice pushing it
         # outward on each word (the level already rises fast, falls slowly).
@@ -251,7 +254,7 @@ class Reactor(_BaseReactor):
             self.Glow(glow, nx / 4, ny / 4, scale * 0.5 * ppu / 4 * 1.6, nop * 0.9)
 
         crisp = self.ToImage(img, col, alpha * 1.25)
-        haze = np.clip(col * (1 - grey) * _HAZE + col * grey, 0.0, 1.0)
+        haze = np.clip(col2 * (1 - grey) * _HAZE + col2 * grey, 0.0, 1.0)
         bloom = self.ToImage(glow, haze, alpha * 0.9)
         return crisp, bloom
 

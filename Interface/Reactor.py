@@ -231,15 +231,17 @@ class Reactor:
 
     # ── rendering ─────────────────────────────────────────────────────────────
 
-    def render(self, size: int, tint: QColor) -> tuple[QImage, QImage]:
+    def render(self, size: int, tint: QColor, tint2: QColor | None = None,
+               mix: float = 0.18) -> tuple[QImage, QImage]:
         """The reactor as two images of `size` square: the crisp light, and a
         small bloom image to be drawn scaled up over it (both additive)."""
         S = int(max(32, size))
         k = self.k
         alpha = float(k[_IDX["alpha"]])
         grey = float(k[_IDX["grey"]])
-        col = _ICE * (1 - 0.18) + _Rgb(tint) * 0.18           # white-ice, a hint of theme
+        col = _ICE * (1 - mix) + _Rgb(tint) * mix              # white-ice, tinted by the accent
         col = col * (1 - grey) + _GREY * grey
+        col2 = col if tint2 is None else (_ICE * (1 - mix) + _Rgb(tint2) * mix) * (1 - grey) + _GREY * grey
 
         c = S / 2.0
         R = S * 0.29 * (1.0 - float(k[_IDX["close"]]))           # shell radius in px
@@ -303,7 +305,7 @@ class Reactor:
             self.Stamp(glow, gx / 4, gy / 4, max(1.0, R * 0.012), 0.55 * gb)
 
         crisp = self.ToImage(img, col, alpha * 1.25)
-        haze = np.clip(col * (1 - grey) * _HAZE + col * grey, 0.0, 1.0)
+        haze = np.clip(col2 * (1 - grey) * _HAZE + col2 * grey, 0.0, 1.0)
         bloom = self.ToImage(glow, haze, alpha * 0.9)
         return crisp, bloom
 
@@ -405,6 +407,8 @@ class ReactorThread(QThread):
         self.level = 0.0
         self.size = 400
         self.tint = QColor("#00d4ff")
+        self.tint2 = None           # a gradient's second colour: the glow
+        self.mix = 0.18             # how much of the colour shows over the ice
         self.visible = True
 
     def frame(self):
@@ -425,7 +429,10 @@ class ReactorThread(QThread):
             try:
                 self.reactor.step(dt, self.state, self.level)
                 if self.visible:
-                    frame = self.reactor.render(self.size, self.tint)
+                    try:
+                        frame = self.reactor.render(self.size, self.tint, self.tint2, self.mix)
+                    except TypeError:       # a reactor that only takes one colour
+                        frame = self.reactor.render(self.size, self.tint)
                     with self._lock:
                         self._frame = frame
                         self._frame_id += 1

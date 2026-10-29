@@ -127,6 +127,7 @@ class C:
     WHITE     = "#f4faff"
     DARK      = "#05090e"
     BAR_BG    = "#0d141c"
+    SECOND    = ""          # a gradient accent's second colour (reactor glow)
 
 
 # Keys tied to the accent colour — status colours (ACC, GREEN, RED…) stay fixed
@@ -175,7 +176,35 @@ def ApplyUiAccent(accent_hex: str) -> bool:
         r, g, b = colorsys.hsv_to_rgb((h + dh) % 1.0, s, v)
         setattr(C, key, "#{:02x}{:02x}{:02x}".format(
             int(r * 255 + 0.5), int(g * 255 + 0.5), int(b * 255 + 0.5)))
+
+    # A real colour (not ice or grey) is used as it is, the way the phone does:
+    # the hue shift alone keeps the default's faint saturation, which turned a
+    # bright red swatch into a pale pink interface.
+    if _Hsv(accent_hex)[1] > 0.35:
+        def Mix(a: str, b: str, t: float) -> str:
+            pa = [int(a[i:i + 2], 16) for i in (1, 3, 5)]
+            pb = [int(b[i:i + 2], 16) for i in (1, 3, 5)]
+            return "#{:02x}{:02x}{:02x}".format(*(int(x + (y - x) * t + 0.5) for x, y in zip(pa, pb)))
+        C.PRI = accent_hex
+        C.PRI_DIM = Mix(accent_hex, C.BG, 0.42)
+        C.PRI_GHO = Mix(C.PANEL, accent_hex, 0.16)
     return True
+
+
+def SetAccentSecond(second_hex: str = "") -> None:
+    """A gradient's second colour (the reactor's glow); empty for one colour."""
+    C.SECOND = (second_hex or "").strip().lower()
+
+
+def ReactorTint() -> tuple[str, str, float]:
+    """(crisp colour, glow colour, how much of it): ice white stays a hint of
+    colour, a real colour comes through strongly."""
+    import colorsys
+    first = C.PRI
+    r, g, b = (int(first[i:i + 2], 16) / 255 for i in (1, 3, 5))
+    vivid = colorsys.rgb_to_hsv(r, g, b)[1]
+    mix = 0.18 + 0.55 * min(1.0, max(0.0, (vivid - 0.15) / 0.6))
+    return first, (C.SECOND or first), mix
 
 
 def CurrentPalette() -> dict[str, str]:
@@ -618,7 +647,8 @@ class HudCanvas(QWidget):
             th = self._reactor
             th.state = reactor_state(self.state, self.speaking, self.muted)
             th.level = amp
-            th.tint = Qcol(C.PRI)
+            first, second, mix = ReactorTint()
+            th.tint, th.tint2, th.mix = Qcol(first), Qcol(second), mix
             th.visible = visible
             fid, frame = th.frame()
             if fid != self._frame_id and frame is not None:
@@ -1343,429 +1373,6 @@ class SetupOverlay(QWidget):
         self.done.emit(key, self._sel_os)
 
 
-class HueWheel(QWidget):
-    """
-    Circular colour picker. The user drags the handle (small white circle)
-    around the wheel to choose from ALL hues. The filled circle in the centre
-    is a live preview of the selected colour.
-    """
-
-    hue_picked    = pyqtSignal(str)   # while dragging (live)
-    hue_committed = pyqtSignal(str)   # when the handle is released
-
-    _RING = 16   # ring thickness (px)
-
-    def __init__(self, initial_hex: str = DEFAULT_UI_COLOR, parent=None):
-        super().__init__(parent)
-        self.setFixedSize(148, 148)
-        self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._hue  = 0.53
-        self._drag = False
-        self.SetColor(initial_hex)
-
-    # ── API ──────────────────────────────────────────────────────────────────
-    def color(self) -> str:
-        return QColor.fromHsvF(self._hue, 1.0, 1.0).name()
-
-    def SetColor(self, hex_str: str):
-        c = QColor((hex_str or "").strip())
-        if c.isValid() and c.hsvHueF() >= 0:
-            self._hue = c.hsvHueF()
-            self.update()
-
-    # ── geometry helpers ─────────────────────────────────────────────────────
-    def RingRect(self) -> QRectF:
-        m = self._RING / 2 + 3
-        return QRectF(self.rect()).adjusted(m, m, -m, -m)
-
-    def HueFromPos(self, pos: QPointF) -> float:
-        c  = QRectF(self.rect()).center()
-        dx = pos.x() - c.x()
-        dy = c.y() - pos.y()          # screen y goes down — flip to math axis
-        ang = math.atan2(dy, dx)      # [-π, π], counter-clockwise
-        return (ang / (2 * math.pi)) % 1.0
-
-    # ── drawing ──────────────────────────────────────────────────────────────
-    def paintEvent(self, _):
-        p = QPainter(self)
-        if not p.isActive():
-            return
-        p.setRenderHint(QPainter.RenderHint.Antialiasing)
-        rect   = self.RingRect()
-        center = rect.center()
-
-        grad = QConicalGradient(center, 0)
-        for i in range(0, 361, 20):
-            grad.setColorAt(i / 360.0, QColor.fromHsvF((i % 360) / 360.0, 1.0, 1.0))
-        p.setPen(QPen(QBrush(grad), self._RING))
-        p.setBrush(Qt.BrushStyle.NoBrush)
-        p.drawEllipse(rect)
-
-        # centre preview circle
-        preview = QColor.fromHsvF(self._hue, 1.0, 1.0)
-        inner   = rect.adjusted(30, 30, -30, -30)
-        p.setPen(QPen(Qcol(C.BORDER_B), 1))
-        p.setBrush(QBrush(preview))
-        p.drawEllipse(inner)
-
-        # draggable handle
-        r   = rect.width() / 2
-        ang = self._hue * 2 * math.pi
-        hx  = center.x() + r * math.cos(ang)
-        hy  = center.y() - r * math.sin(ang)
-        p.setPen(QPen(QColor("#00060a"), 2))
-        p.setBrush(QBrush(QColor("#ffffff")))
-        p.drawEllipse(QPointF(hx, hy), 7.5, 7.5)
-        p.end()
-
-    # ── fare ─────────────────────────────────────────────────────────────────
-    def mousePressEvent(self, e):
-        self._drag = True
-        self._hue  = self.HueFromPos(e.position())
-        self.update()
-        self.hue_picked.emit(self.color())
-
-    def mouseMoveEvent(self, e):
-        if self._drag:
-            self._hue = self.HueFromPos(e.position())
-            self.update()
-            self.hue_picked.emit(self.color())
-
-    def mouseReleaseEvent(self, e):
-        if self._drag:
-            self._drag = False
-            self.hue_committed.emit(self.color())
-
-
-class CustomizeOverlay(QWidget):
-    """Floating overlay — change assistant name, user name, UI colour and voice."""
-
-    saved = pyqtSignal(str, str, str, str)   # assistant_name, user_name, ui_color, voice
-    _OW, _OH = 400, 588
-
-    def __init__(self, assistant_name="ULTRON", user_name="",
-                 ui_color=DEFAULT_UI_COLOR, voice="", parent=None):
-        super().__init__(parent)
-        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
-        self.setStyleSheet(f"""
-            CustomizeOverlay {{
-                background: rgba(0, 6, 10, 245);
-                border: 1px solid {C.BORDER_B};
-                border-radius: 6px;
-            }}
-        """)
-        lay = QVBoxLayout(self)
-        lay.setContentsMargins(24, 18, 24, 18)
-        lay.setSpacing(8)
-
-        def Lbl(txt, fs=9, bold=False, color=C.PRI, align=Qt.AlignmentFlag.AlignCenter):
-            w = QLabel(txt); w.setAlignment(align)
-            w.setFont(QFont(UI_FONT, fs,
-                            QFont.Weight.Bold if bold else QFont.Weight.Normal))
-            w.setStyleSheet(f"color: {color}; background: transparent;")
-            return w
-
-        _fs = (f"QLineEdit {{ background: #000d12; color: {C.TEXT}; "
-               f"border: 1px solid {C.BORDER}; border-radius: 3px; padding: 4px 8px; }}"
-               f"QLineEdit:focus {{ border: 1px solid {C.PRI}; }}")
-
-        lay.addWidget(Lbl("⚙  CUSTOMISE ASSISTANT", 12, True))
-        sep = QFrame(); sep.setFrameShape(QFrame.Shape.HLine)
-        sep.setStyleSheet(f"color: {C.BORDER}; margin: 2px 0;")
-        lay.addWidget(sep)
-
-        lay.addWidget(Lbl("ASSISTANT NAME", 8, color=C.TEXT_DIM,
-                            align=Qt.AlignmentFlag.AlignLeft))
-        self._name_input = QLineEdit(assistant_name)
-        self._name_input.setFont(QFont(UI_FONT, 10))
-        self._name_input.setFixedHeight(32)
-        self._name_input.setStyleSheet(_fs)
-        lay.addWidget(self._name_input)
-
-        lay.addSpacing(4)
-        lay.addWidget(Lbl("YOUR NAME  (leave blank for default sir / efendim)", 8,
-                            color=C.TEXT_DIM, align=Qt.AlignmentFlag.AlignLeft))
-        self._user_input = QLineEdit(user_name)
-        self._user_input.setPlaceholderText("e.g.  Abhinav   (leave blank for auto)")
-        self._user_input.setFont(QFont(UI_FONT, 10))
-        self._user_input.setFixedHeight(32)
-        self._user_input.setStyleSheet(_fs)
-        lay.addWidget(self._user_input)
-
-        # ── Assistant voice — Gemini prebuilt voices ─────────────────────────
-        # Names are language-neutral proper nouns, so the row reads the same in
-        # every locale. Selecting one and applying rebuilds the Live session.
-        from Brain.Settings import AVAILABLE_VOICES, DEFAULT_VOICE
-        lay.addSpacing(4)
-        lay.addWidget(Lbl("ASSISTANT VOICE", 8, color=C.TEXT_DIM,
-                            align=Qt.AlignmentFlag.AlignLeft))
-        self._sel_voice   = (voice or DEFAULT_VOICE)
-        if self._sel_voice not in AVAILABLE_VOICES:
-            self._sel_voice = DEFAULT_VOICE
-        self._voice_btns: dict[str, QPushButton] = {}
-        voice_row = QHBoxLayout(); voice_row.setSpacing(4)
-        for _v in AVAILABLE_VOICES:
-            b = QPushButton(_v)
-            b.setCheckable(True)
-            b.setFixedHeight(28)
-            b.setFont(QFont(UI_FONT, 9, QFont.Weight.Bold))
-            b.setCursor(Qt.CursorShape.PointingHandCursor)
-            b.clicked.connect(lambda _=False, name=_v: self.OnVoicePick(name))
-            self._voice_btns[_v] = b
-            voice_row.addWidget(b)
-        lay.addLayout(voice_row)
-        self.RefreshVoiceBtns()
-
-        # ── UI colour — colour wheel ─────────────────────────────────────────
-        lay.addSpacing(4)
-        clr_hdr = QHBoxLayout()
-        clr_hdr.addWidget(Lbl("UI COLOUR  —  drag the handle", 8,
-                               color=C.TEXT_DIM, align=Qt.AlignmentFlag.AlignLeft))
-        clr_hdr.addStretch()
-        df_btn = QPushButton("DEFAULT")
-        df_btn.setFixedSize(64, 20)
-        df_btn.setFont(QFont(UI_FONT, 8, QFont.Weight.Bold))
-        df_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        df_btn.setStyleSheet(f"""
-            QPushButton {{
-                background: transparent; color: {C.TEXT_MED};
-                border: 1px solid {C.BORDER}; border-radius: 3px;
-            }}
-            QPushButton:hover {{ color: {C.TEXT}; border-color: {C.BORDER_B}; }}
-        """)
-        df_btn.clicked.connect(lambda: self._SetColor(DEFAULT_UI_COLOR))
-        clr_hdr.addWidget(df_btn)
-        lay.addLayout(clr_hdr)
-
-        self._initial_color = (ui_color or DEFAULT_UI_COLOR).strip().lower()
-        self._sel_color     = self._initial_color
-        self.on_preview     = None   # callable(hex) — live preview; MainWindow wires it
-
-        self._wheel = HueWheel(self._sel_color)
-        wheel_row = QHBoxLayout()
-        wheel_row.addStretch(); wheel_row.addWidget(self._wheel); wheel_row.addStretch()
-        lay.addLayout(wheel_row)
-        self._wheel.hue_picked.connect(self.OnWheelPick)
-        self._wheel.hue_committed.connect(self.OnWheelCommit)
-
-        self._hex_input = QLineEdit(self._sel_color)
-        self._hex_input.setPlaceholderText("#00d4ff   (custom hex colour)")
-        self._hex_input.setFont(QFont(UI_FONT, 10))
-        self._hex_input.setFixedHeight(28)
-        self._hex_input.setStyleSheet(_fs)
-        self._hex_input.textEdited.connect(self.OnHexEdited)
-        lay.addWidget(self._hex_input)
-
-        lay.addSpacing(6)
-        btn_row = QHBoxLayout(); btn_row.setSpacing(8)
-
-        save_btn = QPushButton("▸  APPLY CHANGES")
-        save_btn.setFixedHeight(34)
-        save_btn.setFont(QFont(UI_FONT, 10, QFont.Weight.Bold))
-        save_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        save_btn.setStyleSheet(f"""
-            QPushButton {{
-                background: transparent; color: {C.PRI};
-                border: 1px solid {C.PRI_DIM}; border-radius: 3px;
-            }}
-            QPushButton:hover {{ background: {C.PRI_GHO}; border: 1px solid {C.PRI}; }}
-        """)
-        save_btn.clicked.connect(self._Save)
-        btn_row.addWidget(save_btn)
-
-        cancel_btn = QPushButton("CANCEL")
-        cancel_btn.setFixedHeight(34)
-        cancel_btn.setFont(QFont(UI_FONT, 10))
-        cancel_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        cancel_btn.setStyleSheet(f"""
-            QPushButton {{
-                background: transparent; color: {C.TEXT_MED};
-                border: 1px solid {C.BORDER}; border-radius: 3px;
-            }}
-            QPushButton:hover {{ color: {C.TEXT}; border-color: {C.BORDER_B}; }}
-        """)
-        cancel_btn.clicked.connect(self._Cancel)
-        btn_row.addWidget(cancel_btn)
-        lay.addLayout(btn_row)
-
-    # ── voice selection ──────────────────────────────────────────────────────
-    def OnVoicePick(self, name: str):
-        self._sel_voice = name
-        self.RefreshVoiceBtns()
-
-    def RefreshVoiceBtns(self):
-        """Highlight the selected voice pill; dim the rest."""
-        for name, b in self._voice_btns.items():
-            on = (name == self._sel_voice)
-            b.setChecked(on)
-            if on:
-                b.setStyleSheet(f"""
-                    QPushButton {{ background: {C.PRI_GHO}; color: {C.PRI};
-                        border: 1px solid {C.PRI}; border-radius: 3px; }}
-                """)
-            else:
-                b.setStyleSheet(f"""
-                    QPushButton {{ background: transparent; color: {C.TEXT_MED};
-                        border: 1px solid {C.BORDER}; border-radius: 3px; }}
-                    QPushButton:hover {{ color: {C.TEXT}; border-color: {C.BORDER_B}; }}
-                """)
-
-    # ── colour flow ──────────────────────────────────────────────────────────
-    def _SetColor(self, hx: str, update_wheel: bool = True, preview: bool = True):
-        """Updates the selected colour; hex box + wheel stay in sync, theme is live-previewed."""
-        self._sel_color = hx.strip().lower()
-        self._hex_input.blockSignals(True)
-        self._hex_input.setText(self._sel_color)
-        self._hex_input.blockSignals(False)
-        if update_wheel:
-            self._wheel.SetColor(self._sel_color)
-        if preview and self.on_preview:
-            self.on_preview(self._sel_color)
-
-    def OnWheelPick(self, hx: str):
-        # While dragging: update the hex box, don't apply the theme yet
-        self._sel_color = hx
-        self._hex_input.blockSignals(True)
-        self._hex_input.setText(hx)
-        self._hex_input.blockSignals(False)
-
-    def OnWheelCommit(self, hx: str):
-        # Handle released → live-preview the whole interface
-        self._SetColor(hx, update_wheel=False)
-
-    def OnHexEdited(self, text: str):
-        t = text.strip().lower()
-        if t.startswith("#") and len(t) == 7:
-            try:
-                int(t[1:], 16)
-            except ValueError:
-                return
-            self._SetColor(t, update_wheel=True, preview=True)
-
-    def _Cancel(self):
-        # If a preview was applied, revert to the colour from launch
-        if self.on_preview and self._sel_color != self._initial_color:
-            self.on_preview(self._initial_color)
-        self.hide()
-
-    def _Save(self):
-        name = self._name_input.text().strip() or "ULTRON"
-        user = self._user_input.text().strip()
-        self.saved.emit(name, user, self._sel_color or DEFAULT_UI_COLOR, self._sel_voice)
-        self.hide()
-
-
-class PluginManagerOverlay(QWidget):
-    """Floating overlay — lists discovered plugins with per-plugin ON/OFF toggles."""
-
-    _OW = 420
-
-    def __init__(self, plugins: list[dict], parent=None):
-        super().__init__(parent)
-        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
-        self.setStyleSheet(f"""
-            PluginManagerOverlay {{
-                background: rgba(0, 6, 10, 245);
-                border: 1px solid {C.BORDER_B};
-                border-radius: 6px;
-            }}
-        """)
-        self.setFixedWidth(self._OW)
-
-        lay = QVBoxLayout(self)
-        lay.setContentsMargins(20, 16, 20, 16)
-        lay.setSpacing(6)
-
-        hdr = QLabel("🧩  PLUGIN MANAGER")
-        hdr.setFont(QFont(UI_FONT, 12, QFont.Weight.Bold))
-        hdr.setStyleSheet(f"color: {C.PRI}; background: transparent;")
-        lay.addWidget(hdr)
-        sep = QFrame(); sep.setFrameShape(QFrame.Shape.HLine)
-        sep.setStyleSheet(f"color: {C.BORDER}; margin: 2px 0;")
-        lay.addWidget(sep)
-
-        if not plugins:
-            empty = QLabel("No plugins installed yet. Drop a plugin file into the Plugins folder and restart.")
-            empty.setFont(QFont(UI_FONT, 9))
-            empty.setStyleSheet(f"color: {C.TEXT_DIM}; background: transparent;")
-            lay.addWidget(empty)
-
-        for p in plugins:
-            lay.addLayout(self.BuildRow(p))
-
-        lay.addSpacing(4)
-        close_btn = QPushButton("CLOSE")
-        close_btn.setFixedHeight(30)
-        close_btn.setFont(QFont(UI_FONT, 10))
-        close_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        close_btn.setStyleSheet(f"""
-            QPushButton {{
-                background: transparent; color: {C.TEXT_MED};
-                border: 1px solid {C.BORDER}; border-radius: 3px;
-            }}
-            QPushButton:hover {{ color: {C.TEXT}; border-color: {C.BORDER_B}; }}
-        """)
-        close_btn.clicked.connect(self.hide)
-        lay.addWidget(close_btn)
-        self.adjustSize()
-
-    def BuildRow(self, p: dict) -> QHBoxLayout:
-        row = QHBoxLayout(); row.setSpacing(6)
-
-        label_text = p["name"] if p["valid"] else f"{p['name']}  (⚠ {p['file']})"
-        lbl = QLabel(label_text)
-        lbl.setFont(QFont(UI_FONT, 9))
-        lbl.setStyleSheet(f"color: {C.TEXT if p['valid'] else C.TEXT_DIM}; background: transparent;")
-        lbl.setToolTip(p["description"] if p["valid"] else p["error"])
-        lbl.setWordWrap(False)
-        row.addWidget(lbl, stretch=1)
-
-        btn = QPushButton()
-        btn.setFixedSize(72, 24)
-        btn.setFont(QFont(UI_FONT, 8, QFont.Weight.Bold))
-        if not p["valid"]:
-            btn.setText("BROKEN")
-            btn.setEnabled(False)
-            btn.setStyleSheet(f"""
-                QPushButton {{
-                    background: transparent; color: {C.TEXT_DIM};
-                    border: 1px solid {C.BORDER}; border-radius: 3px;
-                }}
-            """)
-        else:
-            btn.setCursor(Qt.CursorShape.PointingHandCursor)
-            self.StyleToggle(btn, p["enabled"])
-            btn.clicked.connect(lambda _, name=p["name"], b=btn: self._Toggle(name, b))
-        row.addWidget(btn)
-        return row
-
-    def StyleToggle(self, btn: QPushButton, enabled: bool):
-        if enabled:
-            btn.setText("ON")
-            btn.setStyleSheet(f"""
-                QPushButton {{
-                    background: #001a08; color: {C.GREEN};
-                    border: 1px solid {C.GREEN_D}; border-radius: 3px;
-                }}
-                QPushButton:hover {{ background: #002010; }}
-            """)
-        else:
-            btn.setText("OFF")
-            btn.setStyleSheet(f"""
-                QPushButton {{
-                    background: transparent; color: {C.TEXT_DIM};
-                    border: 1px solid {C.BORDER}; border-radius: 3px;
-                }}
-                QPushButton:hover {{ color: {C.TEXT}; border-color: {C.BORDER_B}; }}
-            """)
-
-    def _Toggle(self, name: str, btn: QPushButton):
-        from Brain.Settings import GetPluginEnabled, SavePluginEnabled
-        new_val = not GetPluginEnabled(name)
-        SavePluginEnabled(name, new_val)
-        self.StyleToggle(btn, new_val)
-
-
 class _HudOverlay(QWidget):
     """Base for the floating panels placed by hand over the HUD.
 
@@ -1868,559 +1475,6 @@ class ConfirmBanner(_HudOverlay):
         no.setFocus()
 
 
-class AudioDeviceOverlay(_HudOverlay):
-    """Choose which microphone ULTRON listens to and which speakers it uses.
-
-    Both audio streams used to open with no `device=` at all, so they always
-    took the OS default — which on Windows moves by itself the moment a headset
-    is plugged in. 'ULTRON can't hear me' is usually 'ULTRON is listening to the
-    webcam'."""
-
-    picked = pyqtSignal()      # emitted after Apply, when something changed
-
-    # THESE EXIST BECAUSE QTimer.singleShot FROM A WORKER THREAD NEVER FIRES.
-    #
-    # The first version posted results back with `QTimer.singleShot(0, fn)` from
-    # inside the audio thread. A QTimer belongs to the thread that creates it,
-    # and that thread has no event loop — so the timer was created, never ran,
-    # and the panel sat on "Speak now…" for ever while the recording finished
-    # silently behind it. Reported as "I saw no sign of anything at all", which
-    # is precisely what it looked like.
-    #
-    # A signal is the thread-safe way across: Qt queues it onto the receiving
-    # object's thread, which for a widget is the GUI thread. Both carry only
-    # plain values — never a widget — because the widgets belong to the GUI
-    # thread and the worker must not touch them even to pass them along.
-    _level_seen = pyqtSignal(int)          # 0-100, while recording
-    _test_result = pyqtSignal(str, bool)   # sentence, was it good
-
-    _OW = 460
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        from Voice.AudioDevices import ListDevices, DEFAULT_LABEL
-        from Brain.Settings import GetInputDevice, GetOutputDevice
-
-        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
-        self.setStyleSheet(f"""
-            AudioDeviceOverlay {{
-                background: rgba(0, 6, 10, 245);
-                border: 1px solid {C.BORDER_B};
-                border-radius: 6px;
-            }}
-        """)
-        self.setFixedWidth(self._OW)
-
-        lay = QVBoxLayout(self)
-        lay.setContentsMargins(20, 16, 20, 16)
-        lay.setSpacing(6)
-
-        hdr = QLabel("🎧  AUDIO DEVICES")
-        hdr.setFont(QFont(UI_FONT, 12, QFont.Weight.Bold))
-        hdr.setStyleSheet(f"color: {C.PRI}; background: transparent;")
-        lay.addWidget(hdr)
-
-        sep = QFrame(); sep.setFrameShape(QFrame.Shape.HLine)
-        sep.setStyleSheet(f"color: {C.BORDER}; margin: 2px 0;")
-        lay.addWidget(sep)
-
-        _combo_css = (
-            f"QComboBox {{ background: #000d12; color: {C.TEXT}; "
-            f"border: 1px solid {C.BORDER}; border-radius: 3px; padding: 4px 8px; }}"
-            f"QComboBox:hover {{ border-color: {C.BORDER_B}; }}"
-            f"QComboBox QAbstractItemView {{ background: #000d12; color: {C.TEXT}; "
-            f"selection-background-color: {C.PRI_GHO}; border: 1px solid {C.BORDER}; }}"
-        )
-
-        _test_css = (
-            f"QPushButton {{ background: transparent; color: {C.TEXT_DIM}; "
-            f"border: 1px solid {C.BORDER}; border-radius: 3px; }}"
-            f"QPushButton:hover {{ color: {C.PRI}; border-color: {C.PRI_DIM}; }}"
-            f"QPushButton:disabled {{ color: {C.BORDER}; }}"
-        )
-
-        def Row(label: str, kind: str, current: str) -> QComboBox:
-            cap = QLabel(label)
-            cap.setFont(QFont(UI_FONT, 9))
-            cap.setStyleSheet(f"color: {C.TEXT_DIM}; background: transparent;")
-            lay.addWidget(cap)
-
-            box = QComboBox()
-            box.setFont(QFont(UI_FONT, 10))
-            box.setFixedHeight(30)
-            box.setStyleSheet(_combo_css)
-            # The list is served from a cache warmed on a background thread at
-            # startup, so opening this panel never blocks the Qt thread on the
-            # host audio API.
-            box.addItem(DEFAULT_LABEL, "")
-            for name in ListDevices(kind):
-                box.addItem(name, name)
-            idx = box.findData(current) if current else 0
-            box.setCurrentIndex(idx if idx >= 0 else 0)
-            if current and idx < 0:
-                # Saved device is not plugged in right now. Show it rather than
-                # silently resetting the user's choice to default.
-                box.addItem(f"{current}  (not connected)", current)
-                box.setCurrentIndex(box.count() - 1)
-
-            # THE ONE CHECK THE STARTUP PROBE CANNOT MAKE.
-            #
-            # core/audio_devices decides at launch whether a device opens and
-            # whether it moves audio, and it does that with silence. A muted
-            # microphone, a level slider at zero and a privacy shutter all pass
-            # every one of those tests and still deliver a flat line — the only
-            # thing that separates them from a working microphone is a person
-            # speaking into it.
-            #
-            # So the button is here, beside the dropdown, in the panel somebody
-            # opens when ULTRON cannot hear them. It replaces a loose
-            # `ses_testi.py` in the project root that nobody would ever find.
-            btn_row = QHBoxLayout(); btn_row.setSpacing(6)
-            btn_row.addWidget(box, 1)
-            test = QPushButton("TEST")
-            test.setFixedSize(64, 30)
-            test.setFont(QFont(UI_FONT, 9, QFont.Weight.Bold))
-            test.setCursor(Qt.CursorShape.PointingHandCursor)
-            test.setStyleSheet(_test_css)
-            btn_row.addWidget(test)
-            lay.addLayout(btn_row)
-
-            # A meter, because a static label is indistinguishable from a hang.
-            # Three seconds of "Speak now" with nothing moving was reported as
-            # "I saw no sign of anything" — correctly, since nothing on screen
-            # responded to the user's voice.
-            meter = QProgressBar()
-            meter.setRange(0, 100)
-            meter.setValue(0)
-            meter.setTextVisible(False)
-            meter.setFixedHeight(6)
-            meter.setStyleSheet(
-                f"QProgressBar {{ background: #000d12; border: 1px solid {C.BORDER}; "
-                f"border-radius: 3px; }}"
-                f"QProgressBar::chunk {{ background: {C.PRI}; border-radius: 2px; }}")
-            meter.hide()
-            lay.addWidget(meter)
-
-            result = QLabel("")
-            result.setWordWrap(True)
-            result.setFont(QFont(UI_FONT, 8))
-            result.setStyleSheet(f"color: {C.TEXT_DIM}; background: transparent;")
-            lay.addWidget(result)
-
-            test.clicked.connect(
-                lambda _=False, k=kind, b=box, t=test, r=result, m=meter:
-                    self.RunTest(k, b, t, r, m))
-            return box
-
-        # Which row is being tested right now. One at a time — the button is
-        # disabled for the duration — so a single slot is enough, and it keeps
-        # widgets off the signal payload.
-        self._active = None                # (button, label, meter)
-        self._level_seen.connect(self.OnLevel)
-        self._test_result.connect(self.OnResult)
-
-        self._in_box  = Row("MICROPHONE — what ULTRON hears you with",
-                             "input", GetInputDevice())
-        lay.addSpacing(4)
-        self._out_box = Row("SPEAKERS — what ULTRON talks through",
-                             "output", GetOutputDevice())
-
-        # ── Output volume, beside the output device ──────────────────────────
-        #
-        # Choosing "Realtek(R) Audio" here and finding it far too quiet used to
-        # mean leaving this panel, opening the system sound settings, finding
-        # the same endpoint again and moving a slider there. The volume belongs
-        # next to the device it applies to.
-        _vol_now = None
-        try:
-            from Voice.AudioDevices import GetOutputVolume
-            # The SELECTED output, not the system default. Somebody puts the
-            # assistant on their speakers and keeps everything else in their
-            # headphones; a slider labelled with one device that moves the
-            # other is worse than no slider at all.
-            _vol_now = GetOutputVolume(self._out_box.currentData() or "")
-        except Exception:
-            pass
-
-        if _vol_now is not None:
-            vcap = QLabel("OUTPUT VOLUME")
-            vcap.setFont(QFont(UI_FONT, 9))
-            vcap.setStyleSheet(f"color: {C.TEXT_DIM}; background: transparent;")
-            lay.addSpacing(4)
-            lay.addWidget(vcap)
-
-            vrow = QHBoxLayout(); vrow.setSpacing(8)
-            self._vol = QSlider(Qt.Orientation.Horizontal)
-            self._vol.setRange(0, 100)
-            self._vol.setValue(int(_vol_now))
-            self._vol.setFixedHeight(22)
-            self._vol.setStyleSheet(
-                f"QSlider::groove:horizontal {{ background: #000d12; height: 4px; "
-                f"border: 1px solid {C.BORDER}; border-radius: 2px; }}"
-                f"QSlider::sub-page:horizontal {{ background: {C.PRI_DIM}; "
-                f"border-radius: 2px; }}"
-                f"QSlider::handle:horizontal {{ background: {C.PRI}; width: 10px; "
-                f"margin: -5px 0; border-radius: 5px; }}")
-            self._vol_lbl = QLabel(f"{int(_vol_now)}%")
-            self._vol_lbl.setFont(QFont(UI_FONT, 9))
-            self._vol_lbl.setFixedWidth(40)
-            self._vol_lbl.setStyleSheet(f"color: {C.TEXT}; background: transparent;")
-            vrow.addWidget(self._vol, 1)
-            vrow.addWidget(self._vol_lbl)
-            lay.addLayout(vrow)
-
-            # valueChanged fires for every pixel of a drag, and each one is a
-            # COM call into the audio endpoint. sliderReleased fires once, when
-            # the user has decided — the label still follows the handle so the
-            # number moves while they drag.
-            self._vol.valueChanged.connect(
-                lambda v: self._vol_lbl.setText(f"{v}%"))
-            self._vol.sliderReleased.connect(self.ApplyVolume)
-            self._out_box.currentIndexChanged.connect(
-                lambda _i: self.VolumeFollowsDevice())
-
-        note = QLabel("Applying reconnects the session. Your conversation is kept.")
-        note.setWordWrap(True)
-        note.setFont(QFont(UI_FONT, 8))
-        note.setStyleSheet(f"color: {C.TEXT_DIM}; background: transparent;")
-        lay.addSpacing(6)
-        lay.addWidget(note)
-
-        row = QHBoxLayout(); row.setSpacing(8)
-        ok = QPushButton("▸  APPLY")
-        ok.setFixedHeight(32)
-        ok.setFont(QFont(UI_FONT, 10, QFont.Weight.Bold))
-        ok.setCursor(Qt.CursorShape.PointingHandCursor)
-        ok.setStyleSheet(f"""
-            QPushButton {{ background: transparent; color: {C.PRI};
-                border: 1px solid {C.PRI_DIM}; border-radius: 3px; }}
-            QPushButton:hover {{ background: {C.PRI_GHO}; border-color: {C.PRI}; }}
-        """)
-        ok.clicked.connect(self._Apply)
-        row.addWidget(ok)
-
-        cancel = QPushButton("CLOSE")
-        cancel.setFixedHeight(32)
-        cancel.setFont(QFont(UI_FONT, 10))
-        cancel.setCursor(Qt.CursorShape.PointingHandCursor)
-        cancel.setStyleSheet(f"""
-            QPushButton {{ background: transparent; color: {C.TEXT_MED};
-                border: 1px solid {C.BORDER}; border-radius: 3px; }}
-            QPushButton:hover {{ color: {C.TEXT}; border-color: {C.BORDER_B}; }}
-        """)
-        cancel.clicked.connect(self.hide)
-        row.addWidget(cancel)
-        lay.addLayout(row)
-
-    def ApplyVolume(self):
-        """Set the system output volume from the slider, off the Qt thread.
-
-        The Windows path goes through COM, which can block for tens of
-        milliseconds; that is not long enough to see but is long enough to
-        stutter a drag, and there is no reason to make the interface wait for
-        it.
-        """
-        import threading
-        value = self._vol.value()
-        device = self._out_box.currentData() or ""
-
-        def Work():
-            from Voice import AudioDevices
-            if not AudioDevices.SetOutputVolume(value, device):
-                print(f"[Audio] the volume of '{device}' could not be set "
-                      f"to {value}%")
-
-        threading.Thread(target=Work, daemon=True, name="audio-volume").start()
-
-    def VolumeFollowsDevice(self):
-        """Re-read the slider when the chosen output changes.
-
-        Each device keeps its own level, so leaving the handle where it was
-        would show the previous device's volume against the new device's name —
-        and the next drag would then jump it there.
-        """
-        if not hasattr(self, "_vol"):
-            return
-        try:
-            from Voice.AudioDevices import GetOutputVolume
-            now = GetOutputVolume(self._out_box.currentData() or "")
-        except Exception:
-            now = None
-        if now is None:
-            return
-        self._vol.blockSignals(True)
-        self._vol.setValue(int(now))
-        self._vol.blockSignals(False)
-        self._vol_lbl.setText(f"{int(now)}%")
-
-    def RunTest(self, kind, box, button, label, meter=None):
-        """Record or play for real, off the Qt thread.
-
-        Both calls block for seconds — recording waits for the user to speak,
-        the tone waits for itself — and doing that on the Qt thread freezes the
-        HUD, which is the mistake this project already paid for once with a slow
-        import in the settings drawer.
-
-        Results come back by signal, not by timer. See the note on
-        `_level_seen` above for why that distinction is the whole feature.
-        """
-        import threading
-
-        name = box.currentData() or ""
-        self._active = (button, label, meter)
-        button.setEnabled(False)
-        label.setStyleSheet(f"color: {C.TEXT_DIM}; background: transparent;")
-        label.setText("Speak now…" if kind == "input" else "Playing a tone…")
-        if meter is not None and kind == "input":
-            meter.setValue(0)
-            meter.show()
-
-        def Work():
-            from Voice import AudioDevices
-            try:
-                if kind == "input":
-                    res = AudioDevices.MeasureInput(
-                        name,
-                        on_level=lambda f: self._level_seen.emit(int(f * 100)))
-                    text = f"peak {res['peak']}  —  {res['verdict']}"
-                else:
-                    res = AudioDevices.PlayTone(name)
-                    text = res["verdict"]
-                good = bool(res.get("ok", False))
-            except Exception as e:
-                text, good = f"The test itself failed: {e}", False
-            self._test_result.emit(text, good)
-
-        threading.Thread(target=Work, daemon=True, name=f"audio-test-{kind}").start()
-
-    def OnLevel(self, value: int):
-        """A live level, already on the GUI thread thanks to the signal."""
-        if self._active and self._active[2] is not None:
-            self._active[2].setValue(max(0, min(100, value)))
-
-    def OnResult(self, text: str, good: bool):
-        if not self._active:
-            return
-        button, label, meter = self._active
-        self._active = None
-        button.setEnabled(True)
-        if meter is not None:
-            meter.setValue(0)
-            meter.hide()
-        label.setStyleSheet(
-            f"color: {C.PRI if good else C.TEXT_DIM}; background: transparent;")
-        label.setText(text)
-
-    def _Apply(self):
-        from Brain.Settings import GetInputDevice, GetOutputDevice, SaveInputDevice, SaveOutputDevice
-        new_in  = self._in_box.currentData()  or ""
-        new_out = self._out_box.currentData() or ""
-        changed = (new_in != GetInputDevice()) or (new_out != GetOutputDevice())
-        SaveInputDevice(new_in)
-        SaveOutputDevice(new_out)
-        self.hide()
-        # Only rebuild the session if something actually moved — a no-op Apply
-        # should not cost a reconnect.
-        if changed:
-            self.picked.emit()
-
-
-class MemoryOverlay(_HudOverlay):
-    """Everything ULTRON has stored about you, and when it learned it.
-
-    Memory used to be a 2200-character store that deleted its oldest entries
-    when full and mentioned it only on stdout. The cap is gone; this panel is
-    the other half of that change — a memory you cannot inspect is a memory you
-    cannot trust, and 'delete' has to be something the person can do."""
-
-    _OW = 520
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
-        self.setStyleSheet(f"""
-            MemoryOverlay {{
-                background: rgba(0, 6, 10, 246);
-                border: 1px solid {C.BORDER_B};
-                border-radius: 6px;
-            }}
-        """)
-        self.setFixedWidth(self._OW)
-
-        self._lay = QVBoxLayout(self)
-        self._lay.setContentsMargins(20, 16, 20, 16)
-        self._lay.setSpacing(5)
-        self.Rebuild()
-
-    def ClearLayout(self):
-        """Take every item out of the layout and detach it from the widget tree
-        in this call.
-
-        deleteLater() on its own is not enough: it queues destruction for the
-        next event-loop pass, and until then the old rows are still children of
-        this widget and still paint — which is what drew half of the previous
-        panel over the new one. setParent(None) removes them from the tree now;
-        deleteLater() then frees them safely."""
-        while self._lay.count():
-            item = self._lay.takeAt(0)
-            w = item.widget()
-            if w is not None:
-                # hide() stops it painting in this frame; deleteLater() frees it
-                # safely afterwards. setParent(None) would also stop the paint,
-                # but it turns the widget into a top-level window for the moment
-                # between the two calls, which is not something to leave lying
-                # around inside a click handler.
-                w.hide()
-                w.deleteLater()
-                continue
-            sub = item.layout()
-            if sub is not None:
-                while sub.count():
-                    si = sub.takeAt(0)
-                    sw = si.widget()
-                    if sw is not None:
-                        sw.hide()
-                        sw.deleteLater()
-                sub.deleteLater()
-
-    def Settle(self, before):
-        """Size the panel to its content, re-centre it, and repaint what the old
-        size covered.
-
-        The re-size has to happen here rather than at the end of _rebuild
-        because Qt has not polished the freshly-created children at that point,
-        so the size hint it would read is the empty-layout one. Measured: a
-        first adjustSize() returned 32 px for a panel whose content needed 155,
-        and a second call — after the same widgets had been through the event
-        loop — returned 155. So this runs twice: once now, once on the next
-        turn, from _rebuild.
-
-        The re-centre and the repaint are needed because the overlay is placed
-        by hand and is in no layout: shrinking it leaves it off-centre and
-        leaves its former pixels on screen, since nothing tells the parent that
-        region changed. The repaint has to cover the union of the old and new
-        rectangles."""
-        self._lay.invalidate()
-        self._lay.activate()
-        self.updateGeometry()
-        self.adjustSize()
-
-        p = self.parentWidget()
-        if p is None:
-            self.update()
-            return
-        self.move(max(0, (p.width()  - self.width())  // 2),
-                  max(0, (p.height() - self.height()) // 2))
-        p.update(before.united(self.geometry()))
-        self.update()
-
-    def Rebuild(self):
-        before = self.geometry()
-        self.ClearLayout()
-
-        from Brain.Memory import AllEntriesForUi
-
-        hdr = QLabel("🧠  WHAT ULTRON REMEMBERS")
-        hdr.setFont(QFont(UI_FONT, 12, QFont.Weight.Bold))
-        hdr.setStyleSheet(f"color: {C.PRI}; background: transparent;")
-        self._lay.addWidget(hdr)
-
-        sep = QFrame(); sep.setFrameShape(QFrame.Shape.HLine)
-        sep.setStyleSheet(f"color: {C.BORDER}; margin: 2px 0;")
-        self._lay.addWidget(sep)
-
-        rows = AllEntriesForUi()
-
-        cap = QLabel(f"{len(rows)} stored facts — newest first. "
-                     f"Nothing here is sent anywhere; it lives in "
-                     f"Brain/LongTerm.json on this machine.")
-        cap.setWordWrap(True)
-        cap.setFont(QFont(UI_FONT, 8))
-        cap.setStyleSheet(f"color: {C.TEXT_DIM}; background: transparent;")
-        self._lay.addWidget(cap)
-
-        if not rows:
-            empty = QLabel("Nothing stored yet.")
-            empty.setFont(QFont(UI_FONT, 10))
-            empty.setStyleSheet(f"color: {C.TEXT_MED}; background: transparent;")
-            self._lay.addWidget(empty)
-        else:
-            scroll = QScrollArea()
-            scroll.setWidgetResizable(True)
-            scroll.setFixedHeight(min(420, 34 * len(rows) + 10))
-            scroll.setStyleSheet(
-                f"QScrollArea {{ border: 1px solid {C.BORDER}; border-radius: 3px; "
-                f"background: transparent; }}"
-            )
-            inner = QWidget()
-            ilay  = QVBoxLayout(inner)
-            ilay.setContentsMargins(6, 6, 6, 6)
-            ilay.setSpacing(3)
-
-            for r in rows:
-                line = QHBoxLayout(); line.setSpacing(6)
-                txt = QLabel(f"<b>{r['key'].replace('_', ' ')}</b> "
-                             f"<span style='color:{C.TEXT_MED}'>— {r['value']}</span>")
-                txt.setWordWrap(True)
-                txt.setFont(QFont(UI_FONT, 9))
-                txt.setStyleSheet(f"color: {C.TEXT}; background: transparent;")
-                line.addWidget(txt, 1)
-
-                meta = QLabel(f"{r['category'][:4]} · {r['updated'] or '—'}")
-                meta.setFont(QFont(UI_FONT, 8))
-                meta.setStyleSheet(f"color: {C.TEXT_DIM}; background: transparent;")
-                line.addWidget(meta)
-
-                rm = QPushButton("✕")
-                rm.setFixedSize(20, 20)
-                rm.setFont(QFont(UI_FONT, 9, QFont.Weight.Bold))
-                rm.setCursor(Qt.CursorShape.PointingHandCursor)
-                rm.setToolTip("Forget this")
-                rm.setStyleSheet(f"""
-                    QPushButton {{ background: transparent; color: {C.TEXT_DIM};
-                        border: 1px solid {C.BORDER}; border-radius: 3px; }}
-                    QPushButton:hover {{ color: {C.RED}; border-color: {C.RED}; }}
-                """)
-                rm.clicked.connect(
-                    lambda _=False, c=r["category"], k=r["key"]: self.Forget(c, k))
-                line.addWidget(rm)
-
-                holder = QWidget()
-                holder.setLayout(line)
-                ilay.addWidget(holder)
-
-            ilay.addStretch()
-            scroll.setWidget(inner)
-            self._lay.addWidget(scroll)
-
-        close = QPushButton("CLOSE")
-        close.setFixedHeight(30)
-        close.setFont(QFont(UI_FONT, 10))
-        close.setCursor(Qt.CursorShape.PointingHandCursor)
-        close.setStyleSheet(f"""
-            QPushButton {{ background: transparent; color: {C.TEXT_MED};
-                border: 1px solid {C.BORDER}; border-radius: 3px; }}
-            QPushButton:hover {{ color: {C.TEXT}; border-color: {C.BORDER_B}; }}
-        """)
-        close.clicked.connect(self.hide)
-        self._lay.addWidget(close)
-
-        self.Settle(before)
-        # …and again once Qt has polished the new children, because the size
-        # hint is not final until then. Harmless when the first pass already
-        # got it right: _settle is idempotent.
-        QTimer.singleShot(0, lambda g=before: self.Settle(g))
-
-    def Forget(self, category: str, key: str):
-        from Brain.Memory import forget
-        forget(key, category)
-        # Rebuild on the NEXT event-loop turn, not inside this click handler.
-        # The rebuild destroys the very ✕ button that emitted this signal, and
-        # Qt is entitled to touch the sender after a slot returns; tearing it
-        # down mid-emission is how a widget ends up half-alive on screen.
-        QTimer.singleShot(0, self.Rebuild)
-
-
 class _ScrollSafeCombo(QComboBox):
     """A dropdown that does not change when you scroll past it.
 
@@ -2446,6 +1500,34 @@ class _ScrollSafeCombo(QComboBox):
             super().wheelEvent(e)
         else:
             e.ignore()
+
+
+class _WorkerRelay(QObject):
+    """Carries results from worker threads back to the settings pages.
+
+    A worker must never emit a signal that belongs to a page: the page can be
+    closed and deleted while the worker is still running (the installed-voices
+    check alone takes about two seconds), and emitting on a deleted object
+    crashes the whole app. This object is created once and never deleted, so
+    emitting on it is always safe. Pages connect to it; when a page is deleted
+    Qt drops its connections, and late results simply go nowhere."""
+    live_ready = pyqtSignal()                   # a machine-supplied list arrived
+    models_ready = pyqtSignal(str, list)        # provider id, [(value, label)]
+    status = pyqtSignal(str, str, str)          # provider id, text, colour
+    level_seen = pyqtSignal(int)                # microphone test level, 0-100
+    test_result = pyqtSignal(str, bool)         # audio test sentence, good
+    plugin_test = pyqtSignal(str, bool, str)    # namespace, ok, message
+
+
+_relay: _WorkerRelay | None = None
+
+
+def _Relay() -> _WorkerRelay:
+    """The one relay, made on first use (always from the interface thread)."""
+    global _relay
+    if _relay is None:
+        _relay = _WorkerRelay()
+    return _relay
 
 
 class ProvidersOverlay(_HudOverlay):
@@ -2486,13 +1568,12 @@ class ProvidersOverlay(_HudOverlay):
     """
 
     changed = pyqtSignal()          # emitted on APPLY when the engine moved
-    # Emitted from a worker thread when something the machine had to be asked
-    # for — the installed voices — has arrived. A signal rather than a direct
-    # call because the worker must not touch a widget.
-    _live_ready = pyqtSignal()
-    # (provider id, [(value, label), ...]) from a worker that went and asked an
-    # endpoint what it offers.
-    _models_ready = pyqtSignal(str, list)
+    # Results from worker threads (the installed voices, a server's model
+    # list, a status line) come back through _Relay(), never through a signal
+    # of this panel: see _WorkerRelay for why.
+    # A Gemini Live option was switched. They save at once; the window owner
+    # reconnects, since the session reads them when it starts.
+    live_tuned = pyqtSignal()
     _OW = 760                       # the window's own minimum is 820
 
     # Which provider fills each slot, and what the slot is FOR — in the words
@@ -2503,8 +1584,11 @@ class ProvidersOverlay(_HudOverlay):
         ("tts", "③", "SPEAKING", "reads the answer out loud"),
     )
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, hosted: bool = False):
         super().__init__(parent)
+        # hosted: drawn inside Settings, which supplies the frame, title and
+        # scrolling, so this panel brings none of its own.
+        self._hosted = hosted
         # Imported HERE, on the click — never at startup. See the class docstring.
         from Brain.Settings import GetPipeline, GetProviderConfig, GetProviderMode, GetSidecarFirst, GetSidecarProvider
         from Engines import Registry
@@ -2517,8 +1601,10 @@ class ProvidersOverlay(_HudOverlay):
         # so without this the panel freezes for most of two seconds every time
         # a dropdown is touched. Started here rather than at startup, because
         # nothing in this folder may run before somebody opens it.
-        self._live_ready.connect(self.OnLiveReady)
-        self._models_ready.connect(self.OnModelsReady)
+        relay = _Relay()
+        relay.live_ready.connect(self.OnLiveReady)
+        relay.models_ready.connect(self.OnModelsReady)
+        relay.status.connect(self.Say)
         self._model_cache: dict[str, list] = {}
         self._fetching: set = set()
         for _kind in ("tts", "stt", "llm"):
@@ -2528,7 +1614,7 @@ class ProvidersOverlay(_HudOverlay):
                                       fromlist=["prefetch"])
                     _pf = getattr(_mod, "prefetch", None)
                     if _pf:
-                        _pf(self._live_ready.emit)
+                        _pf(relay.live_ready.emit)
                 except Exception:
                     pass
         self._edits: dict[str, dict] = {}       # provider id -> {key: (widget, Field)}
@@ -2540,30 +1626,25 @@ class ProvidersOverlay(_HudOverlay):
         self._picked: dict[str, str] = {}       # slot -> catalog entry id
 
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
-        self.setStyleSheet(f"""
-            ProvidersOverlay {{
-                background: rgba(0, 6, 10, 249);
-                border: 1px solid {C.BORDER_B};
-                border-radius: 8px;
-            }}
-        """)
-        self.setFixedWidth(self._OW)
+        if hosted:
+            self.setStyleSheet("ProvidersOverlay { background: transparent; border: none; }")
+        else:
+            self.setStyleSheet(f"""
+                ProvidersOverlay {{
+                    background: rgba(7, 12, 19, 0.97);
+                    border: 1px solid {GLASS_BORDER}; border-radius: 18px;
+                }}
+            """)
+            self.setFixedWidth(self._OW)
 
         outer = QVBoxLayout(self)
-        outer.setContentsMargins(22, 18, 22, 18)
-        outer.setSpacing(10)
+        outer.setContentsMargins(*((0, 0, 0, 0) if hosted else (22, 18, 22, 18)))
+        outer.setSpacing(14)
 
-        title = QLabel("BRAIN")
-        title.setFont(QFont(UI_FONT, 13, QFont.Weight.Bold))
-        title.setStyleSheet(f"color: {C.PRI}; background: transparent;")
-        outer.addWidget(title)
-
-        sub = QLabel("Choose what powers the conversation. "
-                     "Gemini is the default and needs nothing set up here.")
-        sub.setWordWrap(True)
-        sub.setFont(QFont(UI_FONT, 9))
-        sub.setStyleSheet(f"color: {C.TEXT_DIM}; background: transparent;")
-        outer.addWidget(sub)
+        if not hosted:
+            outer.addWidget(_Text("Brain", 15, C.WHITE, QFont.Weight.DemiBold))
+        outer.addWidget(_Hint("Choose what powers the conversation. Gemini Live is the "
+                              "default and needs nothing set up."))
 
         # ── Mode: two cards, not a dropdown ─────────────────────────────────
         # A dropdown hides the option you did not choose. This is the one
@@ -2572,13 +1653,13 @@ class ProvidersOverlay(_HudOverlay):
         self._mode = GetProviderMode()
         cards = QHBoxLayout(); cards.setSpacing(10)
         self._card_gemini = self.ModeCard(
-            "☁  GEMINI LIVE",
+            "Gemini Live",
             "One connection carries your voice, its voice, the transcript and "
             "the tools together. The fastest option — about half a second to "
             "the first word.",
             "gemini")
         self._card_local = self.ModeCard(
-            "🖥  MY OWN SETUP",
+            "My own setup",
             "Your choice of hearing, thinking and speaking. Can run entirely on "
             "this computer, with nothing leaving it. Slower: 1.5 to 4 seconds.",
             "pipeline")
@@ -2587,6 +1668,43 @@ class ProvidersOverlay(_HudOverlay):
         outer.addLayout(cards)
 
         # ── Body ────────────────────────────────────────────────────────────
+        self._body = QWidget()
+        self._body.setStyleSheet("background: transparent;")
+        self._body_lay = QVBoxLayout(self._body)
+        self._body_lay.setSpacing(14)
+        if hosted:
+            # Settings already scrolls; a second scroll area inside it would
+            # cut the form off at a fixed height.
+            self._body_lay.setContentsMargins(0, 0, 0, 0)
+            outer.addWidget(self._body)
+        else:
+            self._body_lay.setContentsMargins(0, 2, 8, 2)
+            self.BuildScroll(outer)
+
+        # Built BEFORE the body, because `_rebuild_body` writes into it — and
+        # added to the layout after, so it still sits under the scroll area.
+        self._footer = _Hint("")
+
+        self._pipe = dict(GetPipeline())
+        self._sidecar = GetSidecarProvider()
+        self._sidecar_first = GetSidecarFirst()
+        self.RebuildBody()
+
+        row = QHBoxLayout()
+        row.setSpacing(10)
+        row.addWidget(self._footer, 1)
+        if not hosted:
+            close = _GhostButton("Close")
+            close.clicked.connect(self.hide)
+            row.addWidget(close)
+        apply_btn = _PrimaryButton("Save & apply")
+        apply_btn.clicked.connect(self._Apply)
+        row.addWidget(apply_btn)
+        outer.addLayout(row)
+        self.RefreshCards()
+
+    def BuildScroll(self, outer) -> None:
+        """The panel's own scroll area, used only when it floats on its own."""
         self._scroll = QScrollArea()
         self._scroll.setWidgetResizable(True)
         self._scroll.setFrameShape(QFrame.Shape.NoFrame)
@@ -2599,83 +1717,23 @@ class ProvidersOverlay(_HudOverlay):
             "QScrollBar::add-line, QScrollBar::sub-line { height: 0; }"
             "QScrollBar::add-page, QScrollBar::sub-page { background: none; }")
         self._scroll.setMinimumHeight(230)
-        self._scroll.setMaximumHeight(360)
+        self._scroll.setMaximumHeight(420)
         outer.addWidget(self._scroll, 1)
-
-        self._body = QWidget()
-        self._body.setStyleSheet("background: transparent;")
-        self._body_lay = QVBoxLayout(self._body)
-        self._body_lay.setContentsMargins(0, 2, 8, 2)
-        self._body_lay.setSpacing(10)
         self._scroll.setWidget(self._body)
 
-        # Built BEFORE the body, because `_rebuild_body` writes into it — and
-        # added to the layout after, so it still sits under the scroll area.
-        self._footer = QLabel("")
-        self._footer.setWordWrap(True)
-        self._footer.setFont(QFont(UI_FONT, 8))
-        self._footer.setStyleSheet(f"color: {C.TEXT_DIM}; background: transparent;")
-
-        self._pipe = dict(GetPipeline())
-        self._sidecar = GetSidecarProvider()
-        self._sidecar_first = GetSidecarFirst()
-        self.RebuildBody()
-
-        outer.addWidget(self._footer)
-
-        row = QHBoxLayout(); row.setSpacing(8)
-        apply_btn = QPushButton("▸  SAVE  &  APPLY")
-        apply_btn.setFixedHeight(34)
-        apply_btn.setFont(QFont(UI_FONT, 10, QFont.Weight.Bold))
-        apply_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        apply_btn.setStyleSheet(f"""
-            QPushButton {{ background: {C.PRI_GHO}; color: {C.PRI};
-                border: 1px solid {C.PRI_DIM}; border-radius: 4px; }}
-            QPushButton:hover {{ background: {C.BORDER}; border-color: {C.PRI}; }}
-        """)
-        apply_btn.clicked.connect(self._Apply)
-        row.addWidget(apply_btn, 2)
-
-        close = QPushButton("CLOSE")
-        close.setFixedHeight(34)
-        close.setFont(QFont(UI_FONT, 10))
-        close.setCursor(Qt.CursorShape.PointingHandCursor)
-        close.setStyleSheet(f"""
-            QPushButton {{ background: transparent; color: {C.TEXT_MED};
-                border: 1px solid {C.BORDER}; border-radius: 4px; }}
-            QPushButton:hover {{ color: {C.TEXT}; border-color: {C.BORDER_B}; }}
-        """)
-        close.clicked.connect(self.hide)
-        row.addWidget(close, 1)
-        outer.addLayout(row)
-        self.RefreshCards()
-
     # ── pieces ───────────────────────────────────────────────────────────────
-    def ModeCard(self, title: str, body: str, value: str) -> QPushButton:
-        b = QPushButton()
-        b.setCheckable(True)
-        b.setMinimumHeight(84)
-        b.setCursor(Qt.CursorShape.PointingHandCursor)
-        b.setText(f"{title}\n\n{body}")
-        b.setFont(QFont(UI_FONT, 8))
-        b.clicked.connect(lambda _=0, v=value: self.SetMode(v))
-        b.setProperty("modeValue", value)
-        return b
+    def ModeCard(self, title: str, body: str, value: str) -> "_ChoiceCard":
+        # A card rather than a button: a button cannot wrap its text, and the
+        # description was cut off mid-sentence.
+        card = _ChoiceCard(title, body)
+        card.setMinimumHeight(84)
+        card.clicked.connect(lambda v=value: self.SetMode(v))
+        card.setProperty("modeValue", value)
+        return card
 
     def RefreshCards(self) -> None:
         for card in (self._card_gemini, self._card_local):
-            on = card.property("modeValue") == self._mode
-            card.setChecked(on)
-            card.setStyleSheet(f"""
-                QPushButton {{
-                    text-align: left; padding: 10px 12px;
-                    background: {C.PRI_GHO if on else 'transparent'};
-                    color: {C.TEXT if on else C.TEXT_DIM};
-                    border: 1px solid {C.PRI_DIM if on else C.BORDER};
-                    border-radius: 5px;
-                }}
-                QPushButton:hover {{ border-color: {C.BORDER_B}; }}
-            """)
+            card.SetChecked(card.property("modeValue") == self._mode)
 
     def OnLiveReady(self) -> None:
         """A machine-supplied list has arrived — redraw once so it appears."""
@@ -2723,7 +1781,7 @@ class ProvidersOverlay(_HudOverlay):
             finally:
                 self._fetching.discard(pid)
             if items:
-                self._models_ready.emit(pid, items)
+                _Relay().models_ready.emit(pid, items)
 
         threading.Thread(target=work, daemon=True).start()
 
@@ -2744,11 +1802,13 @@ class ProvidersOverlay(_HudOverlay):
         if fn is None:
             return
         values = self.Values(pid) or dict(self._get_cfg(pid))
+        relay = _Relay()
 
         def Report(ok, msg):
             colour = C.TEXT_DIM if ok is None else (C.GREEN if ok else C.RED)
             mark = "" if ok is None else ("✓  " if ok else "✕  ")
-            QTimer.singleShot(0, lambda: self.Say(pid, mark + msg, colour))
+            # Not QTimer.singleShot: from a thread with no event loop it never fires.
+            relay.status.emit(pid, mark + msg, colour)
 
         threading.Thread(target=lambda: fn(values, Report), daemon=True).start()
 
@@ -2787,12 +1847,8 @@ class ProvidersOverlay(_HudOverlay):
     def _Box(self, title_widgets: list) -> tuple[QWidget, QVBoxLayout]:
         """A bordered section. Grouping is the difference between three
         decisions and eleven controls."""
-        w = QWidget()
-        w.setStyleSheet(f"background: {C.PANEL}; border: 1px solid {C.BORDER}; "
-                        f"border-radius: 5px;")
-        lay = QVBoxLayout(w)
-        lay.setContentsMargins(12, 10, 12, 11)
-        lay.setSpacing(5)
+        w, lay = _Card()
+        lay.setSpacing(8)
         for tw in title_widgets:
             lay.addWidget(tw)
         return w, lay
@@ -2808,40 +1864,23 @@ class ProvidersOverlay(_HudOverlay):
         return lb
 
     def Combo(self) -> QComboBox:
-        box = _ScrollSafeCombo()
+        box = _Dropdown()
         box.setFont(QFont(UI_FONT, 9))
-        box.setFixedHeight(29)
-        box.setStyleSheet(
-            f"QComboBox {{ background: {C.DARK}; color: {C.TEXT}; "
-            f"border: 1px solid {C.BORDER}; border-radius: 3px; padding: 3px 9px; }}"
-            f"QComboBox:hover {{ border-color: {C.BORDER_B}; }}"
-            f"QComboBox::drop-down {{ border: none; width: 18px; }}"
-            f"QComboBox QAbstractItemView {{ background: {C.DARK}; color: {C.TEXT}; "
-            f"selection-background-color: {C.PRI_GHO}; "
-            f"border: 1px solid {C.BORDER_B}; padding: 2px; }}")
+        box.setFixedHeight(34)
         return box
 
     def _Line(self, text: str = "") -> QLineEdit:
-        w = QLineEdit(text)
+        w = _Input(text)
         w.setFont(QFont(UI_FONT, 9))
-        w.setFixedHeight(27)
-        w.setStyleSheet(
-            f"QLineEdit {{ background: {C.DARK}; color: {C.TEXT}; "
-            f"border: 1px solid {C.BORDER}; border-radius: 3px; padding: 2px 9px; }}"
-            f"QLineEdit:focus {{ border-color: {C.PRI_DIM}; }}")
+        w.setFixedHeight(34)
         return w
 
     def Btn(self, text: str, slot, colour: str = None) -> QPushButton:
-        b = QPushButton(text)
-        b.setFixedHeight(25)
-        b.setFont(QFont(UI_FONT, 8, QFont.Weight.Bold))
-        b.setCursor(Qt.CursorShape.PointingHandCursor)
-        col = colour or C.TEXT_MED
-        b.setStyleSheet(f"""
-            QPushButton {{ background: transparent; color: {col};
-                border: 1px solid {C.BORDER}; border-radius: 3px; padding: 0 12px; }}
-            QPushButton:hover {{ border-color: {C.BORDER_B}; color: {C.TEXT}; }}
-        """)
+        b = _GhostButton(text)
+        b.setFixedHeight(28)
+        b.setFont(QFont(UI_FONT, 9))
+        if colour:
+            b.setStyleSheet(b.styleSheet().replace(f"color: {C.TEXT};", f"color: {colour};", 1))
         b.clicked.connect(slot)
         return b
 
@@ -2924,23 +1963,15 @@ class ProvidersOverlay(_HudOverlay):
             for slot, num, name, what in self._SLOTS:
                 self._body_lay.addWidget(self.SlotBox(slot, num, name, what))
         else:
-            w, lay = self._Box([])
-            lay.addWidget(self._label(
-                "Nothing to set up. Your voice goes to Gemini and comes back as "
-                "speech over one connection, with the transcript and every tool "
-                "call on the same wire.", 8, C.TEXT_DIM))
-            lay.addWidget(self._label(
-                "Pick MY OWN SETUP above to run it on your own machine, or "
-                "through another company's model.", 7, C.TEXT_DIM))
-            self._body_lay.addWidget(w)
+            self._body_lay.addWidget(self.LiveOptionsBox())
 
         self._body_lay.addWidget(self.SidecarBoxWidget())
         self._body_lay.addStretch(1)
         self.UpdateFooter()
 
     def SlotBox(self, slot: str, num: str, name: str, what: str) -> QWidget:
-        head = self._label(f"{num}  {name}", 9, C.PRI, bold=True)
-        w, lay = self._Box([head, self._label(what, 7, C.TEXT_DIM)])
+        w, lay = self._Box([_Caption(f"{num}  {name}"),
+                            self._label(what[:1].upper() + what[1:] + ".", 8, C.TEXT_DIM)])
 
         entries = self._catalog(slot)
         box = self.Combo()
@@ -3068,7 +2099,7 @@ class ProvidersOverlay(_HudOverlay):
 
         for _key, (w, f) in shown.items():
             lay.addWidget(self._label(
-                f.label + ("" if f.required else "   (optional)"), 7, C.TEXT_DIM))
+                f.label + ("" if f.required else "   (optional)"), 8, C.TEXT_MED))
             lay.addWidget(w)
             # A text box already shows its hint as placeholder text. Adding the
             # label as well printed every hint twice, which is how the panel
@@ -3085,18 +2116,18 @@ class ProvidersOverlay(_HudOverlay):
         self._status[pid] = status
 
         brow = QHBoxLayout(); brow.setSpacing(6)
-        brow.addWidget(self.Btn("TEST", lambda _=0, p=pid: self._test(p), C.PRI))
+        brow.addWidget(self.Btn("Test", lambda _=0, p=pid: self._test(p)))
         # Not "LIST" any more: the list arrives on its own when a service is
         # chosen. This is the button for when it did not — the server was
         # starting up, or a model has just been pulled.
         if any(k in shown for k in ("model", "voice_id", "voice")):
-            brow.addWidget(self.Btn("↻ REFRESH", lambda _=0, p=pid: self._List(p)))
+            brow.addWidget(self.Btn("Refresh list", lambda _=0, p=pid: self._List(p)))
         if advanced:
             brow.addWidget(self.Btn(
-                ("⌃ LESS" if self._more.get(pid) else "⌄ MORE"),
+                ("Fewer options" if self._more.get(pid) else "More options"),
                 lambda _=0, p=pid: self.ToggleMore(p)))
         if not decl.get("_available", True) and decl.get("install"):
-            brow.addWidget(self.Btn(f"INSTALL {decl['install']}",
+            brow.addWidget(self.Btn(f"Install {decl['install']}",
                                      lambda _=0, p=pid: self.Install(p), C.ACC2))
         brow.addStretch(1)
         holder = QWidget()
@@ -3106,9 +2137,8 @@ class ProvidersOverlay(_HudOverlay):
         lay.addWidget(status)
 
         if self._more.get(pid):
-            lay.addWidget(self._label("─" * 46, 7, C.BORDER))
             for f, w in advanced:
-                lay.addWidget(self._label(f"{f.label}   (optional)", 7, C.TEXT_DIM))
+                lay.addWidget(self._label(f"{f.label}   (optional)", 8, C.TEXT_MED))
                 lay.addWidget(w)
                 if f.hint and not isinstance(w, QLineEdit):
                     lay.addWidget(self._label(f.hint, 7, C.TEXT_DIM))
@@ -3158,15 +2188,62 @@ class ProvidersOverlay(_HudOverlay):
         self.RememberEdits()
         QTimer.singleShot(0, self.RebuildBody)
 
-    def SidecarBoxWidget(self) -> QWidget:
-        head = self._label("⚡  BACKGROUND REQUESTS", 9, C.PRI, bold=True)
-        w, lay = self._Box([head])
+    def LiveOptionsBox(self) -> QWidget:
+        """Gemini Live needs no setup, but how it behaves can be tuned. Each
+        switch saves at once; the session picks it up on reconnect."""
+        from Brain.Settings import (GetMediaResolution, GetProactiveAudioEnabled,
+                                    GetThinkingEnabled, GetTurnTuning)
+        w, lay = self._Box([_Caption("Gemini Live")])
         lay.addWidget(self._label(
-            "Reading a document, looking at your screen, writing code — the "
+            "Nothing to set up: your voice goes to Gemini and comes back as speech over "
+            "one connection. These change how it behaves, and each one reconnects for a "
+            "moment. Pick My own setup above to run on your own machine instead.",
+            8, C.TEXT_DIM))
+        think = ToggleSwitch(GetThinkingEnabled())
+        think.toggled.connect(lambda on: self.SetLive("thinking", on))
+        lay.addWidget(_SettingRow(
+            "Think before answering",
+            "Better at hard questions, but it starts talking later.", think))
+        pro = ToggleSwitch(GetProactiveAudioEnabled())
+        pro.toggled.connect(lambda on: self.SetLive("proactive", on))
+        lay.addWidget(_SettingRow(
+            "Ignore talk not meant for it",
+            "Stays quiet while you talk to someone else. Turn off if replies seem to "
+            "come one turn late.", pro))
+        turn = ToggleSwitch(GetTurnTuning()["enabled"])
+        turn.toggled.connect(lambda on: self.SetLive("turns", on))
+        lay.addWidget(_SettingRow(
+            "Quicker turn-taking",
+            "Decides sooner that you have finished. Can cut you off when you pause.", turn))
+        res = _Segmented([("low", "Low"), ("medium", "Medium"), ("high", "High")],
+                         GetMediaResolution())
+        res.picked.connect(lambda v: self.SetLive("media", v))
+        lay.addWidget(_SettingRow(
+            "Screen detail",
+            "How sharply it sees your screen and camera. Higher reads small text "
+            "better and uses more tokens.", res))
+        return w
+
+    def SetLive(self, what: str, value) -> None:
+        from Brain import Settings as S
+        if what == "thinking":
+            S.SaveThinkingEnabled(bool(value))
+        elif what == "proactive":
+            S.SaveProactiveAudioEnabled(bool(value))
+        elif what == "turns":
+            S.SaveTurnTuning({"enabled": bool(value)})
+        elif what == "media":
+            S.SaveMediaResolution(str(value))
+        self.live_tuned.emit()
+
+    def SidecarBoxWidget(self) -> QWidget:
+        w, lay = self._Box([_Caption("Background requests")])
+        lay.addWidget(self._label(
+            "Reading a document, looking at your screen, writing code: the "
             "assistant's own requests, not the conversation. These use Gemini's "
             "text quota, which runs out before the voice does. Sending them "
             "somewhere else keeps them working, and changes nothing you hear.",
-            7, C.TEXT_DIM))
+            8, C.TEXT_DIM))
 
         # Read the stored choice BEFORE the box exists. The first version asked
         # `_sidecar_choice()`, which reads the combo — and at this point that is
@@ -3208,13 +2285,13 @@ class ProvidersOverlay(_HudOverlay):
         if cur_pid:
             if self._mode == "pipeline" and cur_pid == self._pipe.get("llm"):
                 lay.addWidget(self._label(
-                    "Uses the model you chose for ② THINKING.", 7, C.TEXT_DIM))
+                    "Uses the model you chose for ② Thinking.", 8, C.TEXT_DIM))
             else:
                 self.FieldsInto(lay, "llm", cur_pid, cur_eid)
         else:
             lay.addWidget(self._label(
                 "Left as it is, these keep using Gemini and stop working when "
-                "its text quota runs out.", 7, C.TEXT_DIM))
+                "its text quota runs out.", 8, C.TEXT_DIM))
         return w
 
     def SidecarChoice(self) -> tuple:
@@ -3244,13 +2321,14 @@ class ProvidersOverlay(_HudOverlay):
     def UpdateFooter(self) -> None:
         if self._mode != "pipeline":
             self._footer.setText(
-                "Gemini Live. Nothing on this panel changes the conversation.")
+                "Gemini Live options apply at once. Save & apply is for the mode "
+                "and background requests.")
             return
         missing = [name for slot, _n, name, _w in self._SLOTS
                    if not self._pipe.get(slot)]
         if "THINKING" in missing:
             self._footer.setText(
-                "⚠  ② THINKING is not set — without it the assistant falls back "
+                "⚠  ② Thinking is not set. Without it the assistant falls back "
                 "to Gemini Live and says so in the log.")
         elif missing:
             words = " and ".join(f"{m.lower()}" for m in missing)
@@ -3259,7 +2337,7 @@ class ProvidersOverlay(_HudOverlay):
                 f"instead of speak, or read instead of listen.")
         else:
             self._footer.setText(
-                "All three set. SAVE & APPLY reconnects; the conversation is kept.")
+                "All three set. Save & apply reconnects; the conversation is kept.")
 
     # ── actions ──────────────────────────────────────────────────────────────
     def LiveChoices(self, pid: str, key: str) -> tuple:
@@ -3389,6 +2467,7 @@ class ProvidersOverlay(_HudOverlay):
         if not pkg:
             return
         self.Say(pid, f"installing {pkg} — this can take a minute…", C.ACC2)
+        relay = _Relay()
 
         def work():
             try:
@@ -3401,8 +2480,7 @@ class ProvidersOverlay(_HudOverlay):
                        if good else (tail[-1][:150] if tail else "pip failed"))
             except Exception as e:
                 good, msg = False, f"{type(e).__name__}: {str(e)[:120]}"
-            QTimer.singleShot(0, lambda: self.Say(pid, msg,
-                                                   C.GREEN if good else C.RED))
+            relay.status.emit(pid, msg, C.GREEN if good else C.RED)
 
         threading.Thread(target=work, daemon=True).start()
 
@@ -3530,262 +2608,6 @@ class ClipboardPanel(QWidget):
         self._preview.setText(f'"{preview}"')
         self.show(); self.raise_()
         self._dismiss_timer.start(8000)
-
-
-class PluginSettingsOverlay(QWidget):
-    """Floating overlay — renders per-plugin settings forms.
-
-    Fully generic: it iterates the settings schemas a plugin declared via its
-    PLUGIN_SETTINGS constant (delivered by PluginRegistry.settings_schemas) and
-    builds a form for each. It knows NOTHING about any specific plugin, so the
-    core stays clean and plugins remain pure drop-in — install a plugin that
-    declares fields (e.g. the 3D-printer suite) and its section appears here;
-    install none and this panel simply says there's nothing to configure.
-    """
-
-    _test_done = pyqtSignal(str, bool, str)   # namespace, ok, message
-    _OW = 460
-
-    def __init__(self, sections: list[dict], parent=None):
-        super().__init__(parent)
-        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
-        self.setStyleSheet(f"""
-            PluginSettingsOverlay {{
-                background: rgba(0, 6, 10, 245);
-                border: 1px solid {C.BORDER_B};
-                border-radius: 6px;
-            }}
-        """)
-        self._sections = sections or []
-        self._widgets: dict[tuple, object] = {}    # (namespace, key) -> input widget
-        self._types:   dict[tuple, str]    = {}     # (namespace, key) -> field type
-        self._status_labels: dict[str, QLabel] = {} # namespace -> status QLabel
-        self._test_done.connect(self.OnTestDone)
-
-        self._fs = (f"QLineEdit {{ background: #000d12; color: {C.TEXT}; "
-                    f"border: 1px solid {C.BORDER}; border-radius: 3px; padding: 4px 8px; }}"
-                    f"QLineEdit:focus {{ border: 1px solid {C.PRI}; }}")
-
-        root = QVBoxLayout(self)
-        root.setContentsMargins(22, 16, 22, 16)
-        root.setSpacing(8)
-
-        root.addWidget(self.Lbl("⚙  PLUGIN SETTINGS", 12, True))
-        sep = QFrame(); sep.setFrameShape(QFrame.Shape.HLine)
-        sep.setStyleSheet(f"color: {C.BORDER}; margin: 2px 0;")
-        root.addWidget(sep)
-
-        if not self._sections:
-            root.addWidget(self.Lbl(
-                "No configurable plugins are installed.\nDrop a plugin that needs "
-                "settings (like the 3D-printer suite) into the plugins folder and "
-                "it will show up here.", 9, color=C.TEXT_DIM))
-        else:
-            scroll = QScrollArea()
-            scroll.setWidgetResizable(True)
-            scroll.setFrameShape(QFrame.Shape.NoFrame)
-            scroll.setStyleSheet("QScrollArea { background: transparent; }")
-            inner = QWidget()
-            inner.setStyleSheet("background: transparent;")
-            form = QVBoxLayout(inner)
-            form.setContentsMargins(0, 0, 6, 0)
-            form.setSpacing(6)
-            for sec in self._sections:
-                self.BuildSection(form, sec)
-            form.addStretch(1)
-            scroll.setWidget(inner)
-            root.addWidget(scroll, 1)
-
-        # ── bottom buttons ───────────────────────────────────────────────────
-        btn_row = QHBoxLayout(); btn_row.setSpacing(8)
-        if self._sections:
-            save_btn = QPushButton("▸  SAVE")
-            save_btn.setFixedHeight(34)
-            save_btn.setFont(QFont(UI_FONT, 10, QFont.Weight.Bold))
-            save_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-            save_btn.setStyleSheet(f"""
-                QPushButton {{ background: transparent; color: {C.PRI};
-                    border: 1px solid {C.PRI_DIM}; border-radius: 3px; }}
-                QPushButton:hover {{ background: {C.PRI_GHO}; border: 1px solid {C.PRI}; }}
-            """)
-            save_btn.clicked.connect(self._SaveAll)
-            btn_row.addWidget(save_btn)
-
-        close_btn = QPushButton("CLOSE")
-        close_btn.setFixedHeight(34)
-        close_btn.setFont(QFont(UI_FONT, 10))
-        close_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        close_btn.setStyleSheet(f"""
-            QPushButton {{ background: transparent; color: {C.TEXT_MED};
-                border: 1px solid {C.BORDER}; border-radius: 3px; }}
-            QPushButton:hover {{ color: {C.TEXT}; border-color: {C.BORDER_B}; }}
-        """)
-        close_btn.clicked.connect(self.hide)
-        btn_row.addWidget(close_btn)
-        root.addLayout(btn_row)
-
-    # ── helpers ───────────────────────────────────────────────────────────────
-    def Lbl(self, txt, fs=9, bold=False, color=C.PRI,
-             align=Qt.AlignmentFlag.AlignLeft):
-        w = QLabel(txt); w.setAlignment(align); w.setWordWrap(True)
-        w.setFont(QFont(UI_FONT, fs,
-                        QFont.Weight.Bold if bold else QFont.Weight.Normal))
-        w.setStyleSheet(f"color: {color}; background: transparent;")
-        return w
-
-    def BuildSection(self, form: QVBoxLayout, sec: dict):
-        ns     = sec.get("namespace") or sec.get("plugin") or "plugin"
-        title  = sec.get("title") or ns
-        fields = sec.get("fields") or []
-        values = sec.get("values") or {}
-
-        form.addSpacing(4)
-        form.addWidget(self.Lbl(title, 10, True, C.PRI))
-
-        for field in fields:
-            if not isinstance(field, dict) or not field.get("key"):
-                continue
-            key   = field["key"]
-            ftype = (field.get("type") or "text").lower()
-            label = field.get("label") or key
-            default = field.get("default")
-            stored  = values.get(key, default)
-
-            form.addWidget(self.Lbl(label.upper(), 8, color=C.TEXT_DIM))
-
-            if ftype == "choice":
-                w = QComboBox()
-                w.addItems([str(o) for o in field.get("options", [])])
-                w.setFont(QFont(UI_FONT, 10))
-                w.setFixedHeight(30)
-                w.setStyleSheet(
-                    f"QComboBox {{ background: #000d12; color: {C.TEXT}; "
-                    f"border: 1px solid {C.BORDER}; border-radius: 3px; padding: 2px 8px; }}"
-                    f"QComboBox QAbstractItemView {{ background: #000d12; color: {C.TEXT}; "
-                    f"selection-background-color: {C.PRI_GHO}; }}")
-                if stored is not None:
-                    w.setCurrentText(str(stored))
-            elif ftype == "toggle":
-                w = QPushButton()
-                w.setCheckable(True)
-                w.setChecked(bool(stored))
-                w.setFixedHeight(28)
-                w.setFont(QFont(UI_FONT, 9, QFont.Weight.Bold))
-                w.setCursor(Qt.CursorShape.PointingHandCursor)
-                self.StyleToggle(w)
-                w.toggled.connect(lambda _=False, b=w: self.StyleToggle(b))
-            else:  # text / password
-                w = QLineEdit("" if stored is None else str(stored))
-                w.setFont(QFont(UI_FONT, 10))
-                w.setFixedHeight(30)
-                w.setStyleSheet(self._fs)
-                if field.get("placeholder"):
-                    w.setPlaceholderText(str(field["placeholder"]))
-                if ftype == "password":
-                    w.setEchoMode(QLineEdit.EchoMode.Password)
-
-            self._widgets[(ns, key)] = w
-            self._types[(ns, key)]   = ftype
-            form.addWidget(w)
-
-        # optional test/connect action button + status line
-        action = sec.get("action")
-        if isinstance(action, dict) and callable(action.get("run")):
-            form.addSpacing(2)
-            ab = QPushButton(str(action.get("label") or "TEST"))
-            ab.setFixedHeight(30)
-            ab.setFont(QFont(UI_FONT, 9, QFont.Weight.Bold))
-            ab.setCursor(Qt.CursorShape.PointingHandCursor)
-            ab.setStyleSheet(f"""
-                QPushButton {{ background: #00091a; color: {C.PRI};
-                    border: 1px solid {C.PRI_DIM}; border-radius: 3px; }}
-                QPushButton:hover {{ background: {C.PRI_GHO}; border-color: {C.PRI}; }}
-            """)
-            ab.clicked.connect(lambda _=False, n=ns: self.RunAction(n))
-            form.addWidget(ab)
-
-        status = self.Lbl("", 8, color=C.TEXT_DIM)
-        self._status_labels[ns] = status
-        form.addWidget(status)
-
-        line = QFrame(); line.setFrameShape(QFrame.Shape.HLine)
-        line.setStyleSheet(f"color: {C.BORDER}; margin: 4px 0;")
-        form.addWidget(line)
-
-    def StyleToggle(self, btn: QPushButton):
-        on = btn.isChecked()
-        btn.setText("ON" if on else "OFF")
-        if on:
-            btn.setStyleSheet(f"QPushButton {{ background: {C.PRI_GHO}; color: {C.PRI}; "
-                              f"border: 1px solid {C.PRI}; border-radius: 3px; }}")
-        else:
-            btn.setStyleSheet(f"QPushButton {{ background: transparent; color: {C.TEXT_MED}; "
-                              f"border: 1px solid {C.BORDER}; border-radius: 3px; }}")
-
-    # ── data ──────────────────────────────────────────────────────────────────
-    def Gather(self, ns: str) -> dict:
-        out = {}
-        for (n, key), w in self._widgets.items():
-            if n != ns:
-                continue
-            t = self._types.get((n, key), "text")
-            if t == "choice":
-                out[key] = w.currentText()
-            elif t == "toggle":
-                out[key] = w.isChecked()
-            else:
-                out[key] = w.text().strip()
-        return out
-
-    def SaveNs(self, ns: str):
-        from Brain.Settings import SavePluginConfig
-        SavePluginConfig(ns, self.Gather(ns))
-
-    def _SaveAll(self):
-        for sec in self._sections:
-            ns = sec.get("namespace") or sec.get("plugin")
-            if ns:
-                self.SaveNs(ns)
-                lbl = self._status_labels.get(ns)
-                if lbl:
-                    lbl.setText("Saved ✓")
-                    lbl.setStyleSheet(f"color: {C.PRI}; background: transparent;")
-
-    def RunAction(self, ns: str):
-        sec = next((s for s in self._sections
-                    if (s.get("namespace") or s.get("plugin")) == ns), None)
-        if not sec:
-            return
-        run_fn = (sec.get("action") or {}).get("run")
-        if not callable(run_fn):
-            return
-        self.SaveNs(ns)                 # persist what the user typed before testing
-        values = self.Gather(ns)
-        lbl = self._status_labels.get(ns)
-        if lbl:
-            lbl.setText("Testing…")
-            lbl.setStyleSheet(f"color: {C.TEXT_DIM}; background: transparent;")
-
-        def worker():
-            try:
-                res = run_fn(values)
-                if isinstance(res, tuple) and len(res) == 2:
-                    ok, msg = bool(res[0]), str(res[1])
-                else:
-                    ok, msg = bool(res), str(res)
-            except Exception as e:
-                ok, msg = False, str(e)
-            self._test_done.emit(ns, ok, msg)
-
-        threading.Thread(target=worker, daemon=True).start()
-
-    def OnTestDone(self, ns: str, ok: bool, msg: str):
-        lbl = self._status_labels.get(ns)
-        if not lbl:
-            return
-        lbl.setText(msg)
-        color = C.PRI if ok else "#ff6b6b"
-        lbl.setStyleSheet(f"color: {color}; background: transparent;")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -4032,6 +2854,10 @@ class UsagePage(QWidget):
             else:
                 line = f"About a usual day ({_Compact(usual)})"
             c.addWidget(_Text(line, 9, C.TEXT_MED))
+        if today["prompt"] or today["response"]:
+            c.addWidget(_Text(f"{_Compact(today['prompt'])} going in (what you said, the screen, "
+                              f"tool results) · {_Compact(today['response'])} coming back",
+                              8, C.TEXT_DIM, wrap=True))
         stats = QHBoxLayout()
         for label, value in (("Turns", f"{today['turns']:,}"),
                              ("Per turn", _Compact(today["tokens"] / today["turns"]) if today["turns"] else "–"),
@@ -4136,14 +2962,20 @@ class SystemPage(QWidget):
         card, c = _Card()
         c.addWidget(_Caption("Details"))
         self._rows = {}
-        for key, label in (("net", "Network"), ("up", "Up since boot"), ("proc", "Processes"),
+        self._row_widgets = {}
+        for key, label in (("net", "Network"), ("disk", "Disk"), ("bat", "Battery"),
+                           ("up", "Up since boot"), ("proc", "Processes"),
                            ("os", "System"), ("py", "Python")):
-            row = QHBoxLayout()
+            holder = QWidget()
+            holder.setStyleSheet("background: transparent;")
+            row = QHBoxLayout(holder)
+            row.setContentsMargins(0, 0, 0, 0)
             row.addWidget(_Text(label, 10, C.TEXT_MED), 1)
             val = _Text("–", 10, C.TEXT)
             row.addWidget(val)
             self._rows[key] = val
-            c.addLayout(row)
+            self._row_widgets[key] = holder
+            c.addWidget(holder)
         lay.addWidget(card)
         lay.addStretch()
         os_name = {"Windows": "Windows", "Darwin": "macOS", "Linux": "Linux"}.get(_OS, _OS)
@@ -4174,14 +3006,997 @@ class SystemPage(QWidget):
             self._rows["proc"].setText(f"{len(psutil.pids())}")
         except Exception:
             pass
+        try:
+            d = psutil.disk_usage(os.path.abspath(os.sep))
+            self._rows["disk"].setText(f"{d.free / 1024 ** 3:.0f} GB free of {d.total / 1024 ** 3:.0f} GB")
+        except Exception:
+            self._row_widgets["disk"].hide()
+        try:
+            b = psutil.sensors_battery()
+        except Exception:
+            b = None
+        if b is None:
+            self._row_widgets["bat"].hide()
+        else:
+            self._rows["bat"].setText(f"{b.percent:.0f}%" + ("  ·  charging" if b.power_plugged else ""))
+
+
+def _Later(ms: int, owner: QObject, fn) -> None:
+    """Run fn after ms, but only while owner is alive.
+
+    PyQt6 has no QTimer.singleShot(ms, owner, fn): calling it raises, and an
+    exception inside a click handler closes the whole app. A timer parented to
+    the owner gives the same guarantee: it dies with the owner, so it never
+    fires into a deleted page."""
+    t = QTimer(owner)
+    t.setSingleShot(True)
+    t.timeout.connect(fn)
+    t.timeout.connect(t.deleteLater)
+    t.start(ms)
+
+
+# ── Controls shared by the settings pages ───────────────────────────────────
+
+def _Input(text: str = "", placeholder: str = "") -> QLineEdit:
+    w = QLineEdit(text)
+    w.setPlaceholderText(placeholder)
+    w.setFont(QFont(UI_FONT, 10))
+    w.setFixedHeight(36)
+    w.setStyleSheet(f"""
+        QLineEdit {{ background: rgba(0, 0, 0, 0.28); color: {C.TEXT};
+                     border: 1px solid {GLASS_BORDER}; border-radius: 10px; padding: 0 12px; }}
+        QLineEdit:hover {{ border-color: {C.BORDER_B}; }}
+        QLineEdit:focus {{ border-color: {C.PRI_DIM}; }}
+    """)
+    return w
+
+
+def _DropdownCss() -> str:
+    return (f"QComboBox {{ background: rgba(0, 0, 0, 0.28); color: {C.TEXT}; "
+            f"border: 1px solid {GLASS_BORDER}; border-radius: 10px; padding: 0 12px; }}"
+            f"QComboBox:hover {{ border-color: {C.BORDER_B}; }}"
+            f"QComboBox:focus {{ border-color: {C.PRI_DIM}; }}"
+            f"QComboBox QAbstractItemView {{ background: {C.PANEL}; color: {C.TEXT}; "
+            f"selection-background-color: {C.PRI_GHO}; border: 1px solid {C.BORDER_B}; "
+            f"outline: none; padding: 4px; }}")
+
+
+def _Dropdown() -> QComboBox:
+    box = _ScrollSafeCombo()
+    box.setFont(QFont(UI_FONT, 10))
+    box.setFixedHeight(36)
+    box.setStyleSheet(_DropdownCss())
+    return box
+
+
+def _PrimaryButton(text: str) -> QPushButton:
+    b = QPushButton(text.replace("&", "&&"))
+    b.setCursor(Qt.CursorShape.PointingHandCursor)
+    b.setFont(QFont(UI_FONT, 10, QFont.Weight.DemiBold))
+    b.setFixedHeight(36)
+    b.setStyleSheet(f"""
+        QPushButton {{ background: {C.PRI}; color: {C.BG}; border: none;
+                       border-radius: 18px; padding: 0 22px; }}
+        QPushButton:hover {{ background: {C.WHITE}; }}
+        QPushButton:disabled {{ background: {C.BORDER_B}; color: {C.TEXT_DIM}; }}
+    """)
+    return b
+
+
+def _FieldLabel(text: str) -> QLabel:
+    return _Text(text, 9, C.TEXT_MED)
+
+
+def _Hint(text: str) -> QLabel:
+    return _Text(text, 8, C.TEXT_DIM, wrap=True)
+
+
+def _Slider() -> QSlider:
+    s = QSlider(Qt.Orientation.Horizontal)
+    s.setRange(0, 100)
+    s.setFixedHeight(24)
+    s.setCursor(Qt.CursorShape.PointingHandCursor)
+    s.setStyleSheet(
+        f"QSlider {{ background: transparent; }}"
+        f"QSlider::groove:horizontal {{ background: {C.BAR_BG}; height: 4px; border-radius: 2px; }}"
+        f"QSlider::sub-page:horizontal {{ background: {C.PRI}; border-radius: 2px; }}"
+        f"QSlider::handle:horizontal {{ background: {C.WHITE}; width: 14px; height: 14px; "
+        f"margin: -5px 0; border-radius: 7px; }}")
+    return s
+
+
+def _LevelMeter() -> QProgressBar:
+    m = QProgressBar()
+    m.setRange(0, 100)
+    m.setValue(0)
+    m.setTextVisible(False)
+    m.setFixedHeight(6)
+    m.setStyleSheet(
+        f"QProgressBar {{ background: {C.BAR_BG}; border: none; border-radius: 3px; }}"
+        f"QProgressBar::chunk {{ background: {C.PRI}; border-radius: 3px; }}")
+    m.hide()
+    return m
+
+
+def _ClearLayout(lay) -> None:
+    """Empty a layout now. hide() stops the old widgets painting this frame;
+    deleteLater() frees them once the current click has finished with them."""
+    while lay.count():
+        item = lay.takeAt(0)
+        w = item.widget()
+        if w is not None:
+            w.hide()
+            w.deleteLater()
+        elif item.layout() is not None:
+            _ClearLayout(item.layout())
+            item.layout().deleteLater()
+
+
+def _OpenFolder(path: Path) -> None:
+    from PyQt6.QtGui import QDesktopServices
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        pass
+    QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
+
+
+class _Segmented(QWidget):
+    """A row of pills where exactly one is chosen."""
+    picked = pyqtSignal(str)
+
+    def __init__(self, options: list[tuple[str, str]], current: str = "", parent=None):
+        super().__init__(parent)
+        self.setStyleSheet("background: transparent;")
+        h = QHBoxLayout(self)
+        h.setContentsMargins(0, 0, 0, 0)
+        h.setSpacing(6)
+        self._btns: dict[str, QPushButton] = {}
+        self._value = ""
+        for value, label in options:
+            b = QPushButton(label.replace("&", "&&"))
+            b.setCheckable(True)
+            b.setFixedHeight(30)
+            b.setCursor(Qt.CursorShape.PointingHandCursor)
+            b.setFont(QFont(UI_FONT, 9))
+            b.setStyleSheet(f"""
+                QPushButton {{ background: transparent; color: {C.TEXT_MED};
+                               border: 1px solid {GLASS_BORDER}; border-radius: 15px; padding: 0 14px; }}
+                QPushButton:hover {{ color: {C.WHITE}; border-color: {C.BORDER_B}; }}
+                QPushButton:checked {{ background: {C.PRI_GHO}; color: {C.WHITE}; border-color: {C.PRI_DIM}; }}
+            """)
+            b.clicked.connect(lambda _=False, v=value: self.Set(v, emit=True))
+            h.addWidget(b)
+            self._btns[value] = b
+        h.addStretch()
+        self.Set(current)
+
+    def Set(self, value: str, emit: bool = False) -> None:
+        self._value = value
+        for v, b in self._btns.items():
+            b.setChecked(v == value)
+        if emit:
+            self.picked.emit(value)
+
+    def SetLabel(self, value: str, text: str) -> None:
+        if value in self._btns:
+            self._btns[value].setText(text.replace("&", "&&"))
+
+    def Value(self) -> str:
+        return self._value
+
+
+class _ChoiceCard(QFrame):
+    """A card you pick: a title and a line or two under it. Used for the Brain
+    modes and the voices."""
+    clicked = pyqtSignal()
+
+    def __init__(self, title: str, body: str = "", parent=None):
+        super().__init__(parent)
+        self.setObjectName("ChoiceCard")
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._on = False
+        v = QVBoxLayout(self)
+        v.setContentsMargins(14, 11, 14, 12)
+        v.setSpacing(3)
+        self._title = _Text(title, 10, C.TEXT, QFont.Weight.DemiBold)
+        v.addWidget(self._title)
+        self._body = _Text(body, 8, C.TEXT_DIM, wrap=True)
+        if body:
+            v.addWidget(self._body)
+        v.addStretch()
+        self.SetChecked(False)
+
+    def mousePressEvent(self, e):
+        if e.button() == Qt.MouseButton.LeftButton:
+            self.clicked.emit()
+        super().mousePressEvent(e)
+
+    def SetChecked(self, on: bool) -> None:
+        self._on = bool(on)
+        self.setStyleSheet(f"""
+            QFrame#ChoiceCard {{
+                background: {C.PRI_GHO if on else 'rgba(255, 255, 255, 0.03)'};
+                border: 1px solid {C.PRI_DIM if on else GLASS_BORDER}; border-radius: 12px;
+            }}
+            QFrame#ChoiceCard:hover {{ border-color: {C.PRI_DIM if on else C.BORDER_B}; }}
+        """)
+        self._title.setStyleSheet(f"color: {C.WHITE if on else C.TEXT}; background: transparent; border: none;")
+        self._body.setStyleSheet(f"color: {C.TEXT_MED if on else C.TEXT_DIM}; background: transparent; border: none;")
+
+    # Same names as a checkable button, so code written for one works with this.
+    def isChecked(self) -> bool:
+        return self._on
+
+    def setChecked(self, on: bool) -> None:
+        self.SetChecked(on)
+
+
+# ── Settings › Voice & audio ─────────────────────────────────────────────────
+
+# Google's own one-word description of each Gemini voice.
+_VOICE_NOTES = {"Charon": "Informative", "Puck": "Upbeat", "Kore": "Firm",
+                "Fenrir": "Excitable", "Aoede": "Breezy"}
+
+
+class VoicePage(QWidget):
+    """Microphone, speakers, volume and the assistant's voice. Everything saves
+    as soon as it is changed; the window owner reconnects the session."""
+
+    devices_changed = pyqtSignal()
+    voice_changed = pyqtSignal()
+
+    def __init__(self, assistant_name: str = "ULTRON", parent=None):
+        super().__init__(parent)
+        from Voice.AudioDevices import DEFAULT_LABEL, ListDevices
+        from Brain.Settings import (AVAILABLE_VOICES, GetInputDevice, GetOutputDevice,
+                                    GetProviderMode, GetVoice)
+        self.setStyleSheet("background: transparent;")
+        self._active = None                 # (button, label, meter) of the running test
+        # Test results come back through the relay, never a signal of this
+        # page, which may be closed before the test ends (see _WorkerRelay).
+        _Relay().level_seen.connect(self.OnLevel)
+        _Relay().test_result.connect(self.OnResult)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(14)
+
+        def DeviceBox(kind: str, current: str) -> QComboBox:
+            box = _Dropdown()
+            box.addItem(DEFAULT_LABEL, "")
+            for name in ListDevices(kind):
+                box.addItem(name, name)
+            idx = box.findData(current) if current else 0
+            box.setCurrentIndex(idx if idx >= 0 else 0)
+            if current and idx < 0:
+                # The saved device is unplugged: show it rather than quietly
+                # switching the choice back to the default.
+                box.addItem(f"{current}  (not connected)", current)
+                box.setCurrentIndex(box.count() - 1)
+            return box
+
+        name = assistant_name or "ULTRON"
+
+        # Microphone
+        card, c = _Card()
+        c.addWidget(_Caption("Microphone"))
+        c.addWidget(_Hint(f"What {name} hears you with. If it can't hear you, press Test and speak."))
+        self._in_box = DeviceBox("input", GetInputDevice())
+        self._in_test = _GhostButton("Test")
+        row = QHBoxLayout()
+        row.setSpacing(8)
+        row.addWidget(self._in_box, 1)
+        row.addWidget(self._in_test)
+        c.addLayout(row)
+        self._in_meter = _LevelMeter()
+        c.addWidget(self._in_meter)
+        self._in_result = _Hint("")
+        self._in_result.hide()
+        c.addWidget(self._in_result)
+        self._in_test.clicked.connect(
+            lambda: self.RunTest("input", self._in_box, self._in_test, self._in_result, self._in_meter))
+        lay.addWidget(card)
+
+        # Speakers
+        card, c = _Card()
+        c.addWidget(_Caption("Speakers"))
+        c.addWidget(_Hint(f"What {name} talks through."))
+        self._out_box = DeviceBox("output", GetOutputDevice())
+        self._out_test = _GhostButton("Play a tone")
+        row = QHBoxLayout()
+        row.setSpacing(8)
+        row.addWidget(self._out_box, 1)
+        row.addWidget(self._out_test)
+        c.addLayout(row)
+        self._out_result = _Hint("")
+        self._out_result.hide()
+        c.addWidget(self._out_result)
+        self._out_test.clicked.connect(
+            lambda: self.RunTest("output", self._out_box, self._out_test, self._out_result, None))
+
+        self._vol = None
+        try:
+            from Voice.AudioDevices import GetOutputVolume
+            vol_now = GetOutputVolume(self._out_box.currentData() or "")
+        except Exception:
+            vol_now = None
+        if vol_now is not None:
+            vrow = QHBoxLayout()
+            vrow.setSpacing(12)
+            vrow.addWidget(_FieldLabel("Volume"))
+            self._vol = _Slider()
+            self._vol.setValue(int(vol_now))
+            vrow.addWidget(self._vol, 1)
+            self._vol_lbl = _Text(f"{int(vol_now)}%", 9, C.TEXT)
+            self._vol_lbl.setFixedWidth(40)
+            self._vol_lbl.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            vrow.addWidget(self._vol_lbl)
+            c.addLayout(vrow)
+            # The label follows the drag; the device is only set on release,
+            # because each change is a call into the audio endpoint.
+            self._vol.valueChanged.connect(lambda v: self._vol_lbl.setText(f"{v}%"))
+            self._vol.sliderReleased.connect(self.ApplyVolume)
+        lay.addWidget(card)
+
+        self._in_box.currentIndexChanged.connect(lambda _i: self.SaveDevices())
+        self._out_box.currentIndexChanged.connect(lambda _i: self.OnOutputPicked())
+
+        # Voice
+        card, c = _Card()
+        c.addWidget(_Caption("Voice"))
+        self._voice = GetVoice()
+        self._voice_cards: dict[str, _ChoiceCard] = {}
+        vrow = QHBoxLayout()
+        vrow.setSpacing(8)
+        for v in AVAILABLE_VOICES:
+            vc = _ChoiceCard(v, _VOICE_NOTES.get(v, ""))
+            vc.setMinimumHeight(58)
+            vc.clicked.connect(lambda v=v: self.PickVoice(v))
+            self._voice_cards[v] = vc
+            vrow.addWidget(vc, 1)
+        c.addLayout(vrow)
+        self.RefreshVoices()
+        if GetProviderMode() == "pipeline":
+            c.addWidget(_Hint("You are on My own setup, so the voice you hear comes from "
+                              "Brain › Speaking. These voices are used with Gemini Live."))
+        else:
+            c.addWidget(_Hint("Changing the voice starts a fresh conversation."))
+        lay.addWidget(card)
+
+    # devices
+    def SaveDevices(self) -> None:
+        from Brain.Settings import GetInputDevice, GetOutputDevice, SaveInputDevice, SaveOutputDevice
+        new_in = self._in_box.currentData() or ""
+        new_out = self._out_box.currentData() or ""
+        if new_in == GetInputDevice() and new_out == GetOutputDevice():
+            return
+        SaveInputDevice(new_in)
+        SaveOutputDevice(new_out)
+        self.devices_changed.emit()
+
+    def OnOutputPicked(self) -> None:
+        self.VolumeFollowsDevice()
+        self.SaveDevices()
+
+    def ApplyVolume(self) -> None:
+        """Set the chosen output's volume off the Qt thread (COM can block)."""
+        if self._vol is None:
+            return
+        value = self._vol.value()
+        device = self._out_box.currentData() or ""
+
+        def Work():
+            from Voice import AudioDevices
+            if not AudioDevices.SetOutputVolume(value, device):
+                print(f"[Audio] the volume of '{device}' could not be set to {value}%")
+
+        threading.Thread(target=Work, daemon=True, name="audio-volume").start()
+
+    def VolumeFollowsDevice(self) -> None:
+        """Each device keeps its own level, so re-read it when the device changes."""
+        if self._vol is None:
+            return
+        try:
+            from Voice.AudioDevices import GetOutputVolume
+            now = GetOutputVolume(self._out_box.currentData() or "")
+        except Exception:
+            now = None
+        if now is None:
+            return
+        self._vol.blockSignals(True)
+        self._vol.setValue(int(now))
+        self._vol.blockSignals(False)
+        self._vol_lbl.setText(f"{int(now)}%")
+
+    def RunTest(self, kind, box, button, label, meter=None) -> None:
+        """Record or play for real, off the Qt thread: both block for seconds."""
+        if self._active is not None:
+            return
+        name = box.currentData() or ""
+        self._active = (button, label, meter)
+        button.setEnabled(False)
+        label.show()
+        label.setStyleSheet(f"color: {C.TEXT_DIM}; background: transparent; border: none;")
+        label.setText("Speak now…" if kind == "input" else "Playing a tone…")
+        if meter is not None:
+            meter.setValue(0)
+            meter.show()
+        relay = _Relay()
+
+        def Work():
+            from Voice import AudioDevices
+            try:
+                if kind == "input":
+                    res = AudioDevices.MeasureInput(
+                        name, on_level=lambda f: relay.level_seen.emit(int(f * 100)))
+                    text = f"Peak {res['peak']}  —  {res['verdict']}"
+                else:
+                    res = AudioDevices.PlayTone(name)
+                    text = res["verdict"]
+                good = bool(res.get("ok", False))
+            except Exception as e:
+                text, good = f"The test itself failed: {e}", False
+            relay.test_result.emit(text, good)
+
+        threading.Thread(target=Work, daemon=True, name=f"audio-test-{kind}").start()
+
+    def OnLevel(self, value: int) -> None:
+        if self._active and self._active[2] is not None:
+            self._active[2].setValue(max(0, min(100, value)))
+
+    def OnResult(self, text: str, good: bool) -> None:
+        if not self._active:
+            return
+        button, label, meter = self._active
+        self._active = None
+        try:
+            button.setEnabled(True)
+            if meter is not None:
+                meter.hide()
+            label.setStyleSheet(f"color: {C.GREEN if good else C.RED}; background: transparent; border: none;")
+            label.setText(text)
+        except RuntimeError:
+            pass                            # the page was closed mid-test
+
+    # voice
+    def PickVoice(self, voice: str) -> None:
+        from Brain.Settings import GetVoice, SaveVoice
+        self._voice = voice
+        self.RefreshVoices()
+        if voice != GetVoice():
+            SaveVoice(voice)
+            self.voice_changed.emit()
+
+    def RefreshVoices(self) -> None:
+        for v, card in self._voice_cards.items():
+            card.SetChecked(v == self._voice)
+
+
+# ── Settings › Look & name ───────────────────────────────────────────────────
+
+class _AccentSwatch(QWidget):
+    """One accent as it looks: one colour, the two of a pair, or the colours a
+    living one goes through, round the dot. Painted, not styled, so the live
+    re-theme never repaints a swatch in somebody else's colour."""
+    clicked = pyqtSignal()
+
+    def __init__(self, accent, parent=None):
+        super().__init__(parent)
+        from Interface import Accents
+        self.accent = accent
+        self._colours = Accents.Swatch(accent)
+        self._on = False
+        self.setFixedSize(64, 66)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setToolTip(accent.label)
+
+    def SetChecked(self, on: bool) -> None:
+        self._on = bool(on)
+        self.update()
+
+    def isChecked(self) -> bool:
+        return self._on
+
+    def mousePressEvent(self, e):
+        if e.button() == Qt.MouseButton.LeftButton:
+            self.clicked.emit()
+
+    def enterEvent(self, e):
+        self.update()
+
+    def leaveEvent(self, e):
+        self.update()
+
+    def paintEvent(self, _):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        main = QColor(self._colours[0])
+        cx, top, d = self.width() / 2, 4.0, 40.0
+        ring = QRectF(cx - d / 2, top, d, d)
+        edge = QColor(main)
+        edge.setAlpha(255 if self._on else (140 if self.underMouse() else 77))
+        p.setPen(QPen(edge, 2 if self._on else 1))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawEllipse(ring.adjusted(1, 1, -1, -1))
+        dot = 22.0 if self._on else 26.0
+        r = QRectF(cx - dot / 2, top + (d - dot) / 2, dot, dot)
+        p.setPen(Qt.PenStyle.NoPen)
+        if len(self._colours) > 2:
+            g = QConicalGradient(r.center(), 90)
+            n = len(self._colours) - 1
+            for i, hx in enumerate(self._colours):
+                g.setColorAt(i / n, QColor(hx))
+            p.setBrush(QBrush(g))
+        elif len(self._colours) == 2:
+            g = QLinearGradient(r.topLeft(), r.bottomRight())
+            g.setColorAt(0, QColor(self._colours[0]))
+            g.setColorAt(1, QColor(self._colours[1]))
+            p.setBrush(QBrush(g))
+        else:
+            p.setBrush(main)
+        p.drawEllipse(r)
+        p.setPen(main if self._on else Qcol(C.TEXT_DIM))
+        p.setFont(QFont(UI_FONT, 8, QFont.Weight.DemiBold if self._on else QFont.Weight.Normal))
+        p.drawText(QRectF(0, top + d + 3, self.width(), 18),
+                   Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop, self.accent.label)
+        p.end()
+
+
+class LookPage(QWidget):
+    """Names and the colour. Names save when you leave the box; a colour is
+    applied the moment it is tapped, the same swatches as JARVIS on the phone."""
+
+    def __init__(self, window, parent=None):
+        super().__init__(parent)
+        from Interface import Accents
+        self._window = window
+        cfg = ReadFullConfig()
+        self.setStyleSheet("background: transparent;")
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(14)
+
+        card, c = _Card()
+        c.addWidget(_Caption("Names"))
+        self._saved_names = (cfg.get("assistant_name", "ULTRON") or "ULTRON", cfg.get("user_name", "") or "")
+        c.addWidget(_FieldLabel("Assistant name"))
+        self._name = _Input(self._saved_names[0], "ULTRON")
+        c.addWidget(self._name)
+        c.addSpacing(2)
+        c.addWidget(_FieldLabel("What it calls you"))
+        self._user = _Input(self._saved_names[1], "Leave empty and it says sir")
+        c.addWidget(self._user)
+        self._names_note = _Hint("Saved when you leave the box.")
+        c.addWidget(self._names_note)
+        self._name.editingFinished.connect(self.SaveNames)
+        self._user.editingFinished.connect(self.SaveNames)
+        lay.addWidget(card)
+
+        card, c = _Card()
+        c.addWidget(_Caption("Colour"))
+        self._current = Accents.Of(cfg.get("accent")).key
+        self._swatches: dict[str, _AccentSwatch] = {}
+        for group in Accents.GROUPS:
+            c.addWidget(_Text(group, 9, C.TEXT_DIM))
+            row = QHBoxLayout()
+            row.setSpacing(2)
+            for accent in Accents.InGroup(group):
+                sw = _AccentSwatch(accent)
+                sw.clicked.connect(lambda k=accent.key: self.Pick(k))
+                self._swatches[accent.key] = sw
+                row.addWidget(sw)
+            row.addStretch()
+            c.addLayout(row)
+        c.addWidget(_Hint(Accents.HINT))
+        lay.addWidget(card)
+        self.RefreshSwatches()
+
+    def SaveNames(self) -> None:
+        name = self._name.text().strip() or "ULTRON"
+        user = self._user.text().strip()
+        if (name, user) == self._saved_names:
+            return
+        self._saved_names = (name, user)
+        self._window.ApplyNameUpdate(name, user)
+        self._names_note.setText("Saved.")
+        _Later(2500, self, lambda: self._names_note.setText("Saved when you leave the box."))
+
+    def Pick(self, key: str) -> None:
+        self._current = key
+        self.RefreshSwatches()
+        self._window.SetAccent(key)
+
+    def RefreshSwatches(self) -> None:
+        for key, sw in self._swatches.items():
+            sw.SetChecked(key == self._current)
+
+
+# ── Settings › Memory ────────────────────────────────────────────────────────
+
+_MEMORY_GROUPS = (
+    ("identity", "About you"), ("preferences", "Preferences"), ("projects", "Projects"),
+    ("relationships", "People"), ("wishes", "Wishes"), ("notes", "Notes"),
+)
+_MEMORY_SHOWN = 150          # rows drawn at once; search narrows the rest
+
+
+def _FriendlyDay(stamp: str) -> str:
+    from datetime import date as _d
+    try:
+        d = _d.fromisoformat((stamp or "")[:10])
+    except ValueError:
+        return ""
+    gap = (_d.today() - d).days
+    if gap == 0:
+        return "today"
+    if gap == 1:
+        return "yesterday"
+    return d.strftime("%d %b %Y") if d.year != _d.today().year else d.strftime("%d %b")
+
+
+class MemoryPage(QWidget):
+    """What the assistant remembers about you: search it, filter it, teach it
+    something, and make it forget."""
+
+    def __init__(self, assistant_name: str = "ULTRON", parent=None):
+        super().__init__(parent)
+        self.setStyleSheet("background: transparent;")
+        self._filter = ""
+        self._query = ""
+        self._armed = None                  # (category, key, button) waiting for "Sure?"
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(14)
+
+        card, c = _Card()
+        head = QHBoxLayout()
+        self._count = _Text("", 12, C.WHITE, QFont.Weight.DemiBold)
+        head.addWidget(self._count, 1)
+        self._add_btn = _GhostButton("+  Teach it something")
+        self._add_btn.clicked.connect(self.ShowAdd)
+        head.addWidget(self._add_btn)
+        c.addLayout(head)
+        self._search = _Input("", "Search")
+        self._search.textChanged.connect(self.SetQuery)
+        c.addWidget(self._search)
+        self._pills = _Segmented([("", "All")] + list(_MEMORY_GROUPS), "")
+        self._pills.picked.connect(self.SetFilter)
+        c.addWidget(self._pills)
+        lay.addWidget(card)
+
+        self._add_card, a = _Card()
+        a.addWidget(_Caption("Teach it something"))
+        self._add_cat = _Dropdown()
+        for key, label in _MEMORY_GROUPS:
+            self._add_cat.addItem(label, key)
+        self._add_cat.setCurrentIndex(self._add_cat.findData("notes"))
+        self._add_key = _Input("", "About what, e.g. favourite coffee")
+        self._add_val = _Input("", "What to remember, e.g. flat white, no sugar")
+        top = QHBoxLayout()
+        top.setSpacing(8)
+        top.addWidget(self._add_cat)
+        top.addWidget(self._add_key, 1)
+        a.addLayout(top)
+        a.addWidget(self._add_val)
+        btns = QHBoxLayout()
+        btns.addStretch()
+        cancel = _GhostButton("Cancel")
+        cancel.clicked.connect(self.HideAdd)
+        btns.addWidget(cancel)
+        save = _PrimaryButton("Remember")
+        save.clicked.connect(self.AddEntry)
+        btns.addWidget(save)
+        a.addLayout(btns)
+        self._add_val.returnPressed.connect(self.AddEntry)
+        self._add_card.hide()
+        lay.addWidget(self._add_card)
+
+        card, self._list = _Card()
+        self._list.setSpacing(2)
+        lay.addWidget(card)
+        lay.addWidget(_Hint(f"Kept on this computer in Brain/LongTerm.json. While you talk, the "
+                            f"parts that matter are given to the model so {assistant_name} can use them."))
+        self.Refresh()
+
+    # filters
+    def SetQuery(self, text: str) -> None:
+        self._query = text.strip().lower()
+        self.Refresh()
+
+    def SetFilter(self, cat: str) -> None:
+        self._filter = cat
+        self.Refresh()
+
+    # list
+    def Refresh(self) -> None:
+        from Brain.Memory import AllEntriesForUi
+        self._armed = None
+        rows = AllEntriesForUi()
+        counts: dict[str, int] = {}
+        for r in rows:
+            counts[r["category"]] = counts.get(r["category"], 0) + 1
+        n = len(rows)
+        self._count.setText(f"{n} thing{'s' if n != 1 else ''} remembered" if n else "Nothing remembered yet")
+        self._pills.SetLabel("", f"All  {n}" if n else "All")
+        for key, label in _MEMORY_GROUPS:
+            self._pills.SetLabel(key, f"{label}  {counts[key]}" if counts.get(key) else label)
+
+        shown = [r for r in rows
+                 if (not self._filter or r["category"] == self._filter)
+                 and (not self._query or self._query in r["key"].replace("_", " ").lower()
+                      or self._query in r["value"].lower())]
+        _ClearLayout(self._list)
+        if not shown:
+            if not rows:
+                msg = ("Nothing yet. Tell it things while you talk (\"remember that I take my coffee "
+                       "black\"), or use Teach it something above.")
+            else:
+                msg = "Nothing matches."
+            self._list.addWidget(_Text(msg, 9, C.TEXT_MED, wrap=True))
+            return
+        for i, r in enumerate(shown[:_MEMORY_SHOWN]):
+            if i:
+                line = QFrame()
+                line.setFixedHeight(1)
+                line.setStyleSheet(f"background: {GLASS_BORDER}; border: none;")
+                self._list.addWidget(line)
+            self._list.addWidget(self.Row(r))
+        if len(shown) > _MEMORY_SHOWN:
+            self._list.addWidget(_Hint(f"Showing {_MEMORY_SHOWN} of {len(shown)}. Search to find the rest."))
+
+    def Row(self, r: dict) -> QWidget:
+        w = QWidget()
+        w.setStyleSheet("background: transparent;")
+        h = QHBoxLayout(w)
+        h.setContentsMargins(0, 6, 0, 6)
+        h.setSpacing(12)
+        col = QVBoxLayout()
+        col.setSpacing(2)
+        title = r["key"].replace("_", " ").strip()
+        col.addWidget(_Text(title[:1].upper() + title[1:], 10, C.TEXT, QFont.Weight.DemiBold, wrap=True))
+        col.addWidget(_Text(r["value"], 9, C.TEXT_MED, wrap=True))
+        group = dict(_MEMORY_GROUPS).get(r["category"], r["category"].capitalize())
+        when = _FriendlyDay(r.get("updated", ""))
+        col.addWidget(_Text(group + (f"  ·  {when}" if when else ""), 8, C.TEXT_DIM))
+        h.addLayout(col, 1)
+        rm = QPushButton("Forget")
+        rm.setCursor(Qt.CursorShape.PointingHandCursor)
+        rm.setFont(QFont(UI_FONT, 8))
+        rm.setFixedHeight(26)
+        self.StyleForget(rm, False)
+        rm.clicked.connect(lambda _=False, c=r["category"], k=r["key"], b=rm: self.Forget(c, k, b))
+        h.addWidget(rm, 0, Qt.AlignmentFlag.AlignTop)
+        return w
+
+    @staticmethod
+    def StyleForget(b: QPushButton, armed: bool) -> None:
+        b.setText("Sure?" if armed else "Forget")
+        col = C.RED if armed else C.TEXT_DIM
+        b.setStyleSheet(f"""
+            QPushButton {{ background: transparent; color: {col};
+                           border: 1px solid {C.RED if armed else GLASS_BORDER};
+                           border-radius: 13px; padding: 0 12px; }}
+            QPushButton:hover {{ color: {C.RED}; border-color: {C.RED}; }}
+        """)
+
+    def Forget(self, category: str, key: str, button: QPushButton) -> None:
+        """Two clicks: the first asks, the second forgets. Nothing is undone."""
+        if self._armed and self._armed[:2] == (category, key):
+            from Brain.Memory import forget
+            forget(key, category)
+            self._armed = None
+            # Rebuild after this click returns: the rebuild deletes this button.
+            _Later(0, self, self.Refresh)
+            return
+        if self._armed:
+            try:
+                self.StyleForget(self._armed[2], False)
+            except RuntimeError:
+                pass
+        self._armed = (category, key, button)
+        self.StyleForget(button, True)
+
+        def Disarm(b=button, ck=(category, key)):
+            if self._armed and self._armed[:2] == ck:
+                self._armed = None
+                try:
+                    self.StyleForget(b, False)
+                except RuntimeError:
+                    pass
+        _Later(4000, self, Disarm)
+
+    # adding
+    def ShowAdd(self) -> None:
+        self._add_card.show()
+        self._add_btn.hide()
+        self._add_key.setFocus()
+
+    def HideAdd(self) -> None:
+        self._add_key.clear()
+        self._add_val.clear()
+        self._add_card.hide()
+        self._add_btn.show()
+
+    def AddEntry(self) -> None:
+        from Brain.Memory import remember
+        key = "_".join(self._add_key.text().strip().lower().split())[:60]
+        value = self._add_val.text().strip()
+        if not key or not value:
+            (self._add_key if not key else self._add_val).setFocus()
+            return
+        remember(key, value, self._add_cat.currentData() or "notes")
+        self.HideAdd()
+        self._pills.Set("")
+        self._filter = ""
+        self._search.clear()
+        self.Refresh()
+
+
+# ── Settings › Plugins ───────────────────────────────────────────────────────
+
+class PluginsPage(QWidget):
+    """Installed plugins with an on/off switch each, and the settings any of
+    them declare. The page knows nothing about a particular plugin: each one
+    describes its own fields (PLUGIN_SETTINGS)."""
+
+    changed = pyqtSignal()                   # a plugin was switched on or off
+
+    def __init__(self, plugins: list[dict], sections: list[dict], assistant_name: str = "ULTRON",
+                 parent=None):
+        super().__init__(parent)
+        self.setStyleSheet("background: transparent;")
+        self._sections = sections or []
+        self._widgets: dict[tuple, object] = {}
+        self._types: dict[tuple, str] = {}
+        self._status: dict[str, QLabel] = {}
+        _Relay().plugin_test.connect(self.OnTestDone)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(14)
+
+        card, c = _Card()
+        head = QHBoxLayout()
+        head.addWidget(_Caption("Installed"), 1)
+        folder = _GhostButton("Open plugins folder")
+        folder.clicked.connect(lambda: _OpenFolder(BaseDir() / "Plugins"))
+        head.addWidget(folder)
+        c.addLayout(head)
+        if not plugins:
+            c.addWidget(_Text("No plugins yet. Put a plugin file in the Plugins folder and restart.",
+                              9, C.TEXT_MED, wrap=True))
+        for p in plugins:
+            label = _ToolLabel(p["name"])
+            if p.get("valid"):
+                sw = ToggleSwitch(bool(p.get("enabled")))
+                sw.toggled.connect(lambda on, n=p["name"]: self.SetEnabled(n, on))
+                c.addWidget(_SettingRow(label, p.get("description") or "", sw))
+            else:
+                tag = _Text("Broken", 8, C.RED, QFont.Weight.DemiBold)
+                why = f"{p.get('file', '')}: {p.get('error', '')}".strip(": ")
+                c.addWidget(_SettingRow(label, why[:220], tag))
+        if plugins:
+            c.addWidget(_Hint(f"Switching one on or off reconnects for a moment, so {assistant_name} "
+                              f"sees the change."))
+        lay.addWidget(card)
+
+        for sec in self._sections:
+            lay.addWidget(self.Section(sec))
+
+    def SetEnabled(self, name: str, on: bool) -> None:
+        from Brain.Settings import GetPluginEnabled, SavePluginEnabled
+        if on != GetPluginEnabled(name):
+            SavePluginEnabled(name, on)
+            self.changed.emit()
+
+    def Section(self, sec: dict) -> QWidget:
+        ns = sec.get("namespace") or sec.get("plugin") or "plugin"
+        values = sec.get("values") or {}
+        card, c = _Card()
+        c.addWidget(_Caption(sec.get("title") or ns))
+        for field in sec.get("fields") or []:
+            if not isinstance(field, dict) or not field.get("key"):
+                continue
+            key = field["key"]
+            ftype = (field.get("type") or "text").lower()
+            label = field.get("label") or key
+            stored = values.get(key, field.get("default"))
+            if ftype == "toggle":
+                w = ToggleSwitch(bool(stored))
+                c.addWidget(_SettingRow(label, field.get("hint") or "", w))
+            else:
+                c.addWidget(_FieldLabel(label))
+                if ftype == "choice":
+                    w = _Dropdown()
+                    w.addItems([str(o) for o in field.get("options", [])])
+                    if stored is not None:
+                        w.setCurrentText(str(stored))
+                else:
+                    w = _Input("" if stored is None else str(stored), str(field.get("placeholder") or ""))
+                    if ftype == "password":
+                        w.setEchoMode(QLineEdit.EchoMode.Password)
+                c.addWidget(w)
+            self._widgets[(ns, key)] = w
+            self._types[(ns, key)] = ftype
+
+        row = QHBoxLayout()
+        row.setSpacing(8)
+        status = _Hint("")
+        self._status[ns] = status
+        row.addWidget(status, 1)
+        action = sec.get("action")
+        if isinstance(action, dict) and callable(action.get("run")):
+            test = _GhostButton(str(action.get("label") or "Test").capitalize())
+            test.clicked.connect(lambda _=False, n=ns: self.RunAction(n))
+            row.addWidget(test)
+        save = _PrimaryButton("Save")
+        save.clicked.connect(lambda _=False, n=ns: self.SaveNs(n, say=True))
+        row.addWidget(save)
+        c.addLayout(row)
+        return card
+
+    def Gather(self, ns: str) -> dict:
+        out = {}
+        for (n, key), w in self._widgets.items():
+            if n != ns:
+                continue
+            t = self._types.get((n, key), "text")
+            if t == "choice":
+                out[key] = w.currentText()
+            elif t == "toggle":
+                out[key] = w.isChecked()
+            else:
+                out[key] = w.text().strip()
+        return out
+
+    def Say(self, ns: str, text: str, colour: str) -> None:
+        lbl = self._status.get(ns)
+        if lbl is not None:
+            lbl.setText(text)
+            lbl.setStyleSheet(f"color: {colour}; background: transparent; border: none;")
+
+    def SaveNs(self, ns: str, say: bool = False) -> None:
+        from Brain.Settings import SavePluginConfig
+        SavePluginConfig(ns, self.Gather(ns))
+        if say:
+            self.Say(ns, "Saved.", C.GREEN)
+
+    def RunAction(self, ns: str) -> None:
+        sec = next((s for s in self._sections
+                    if (s.get("namespace") or s.get("plugin")) == ns), None)
+        run_fn = ((sec or {}).get("action") or {}).get("run")
+        if not callable(run_fn):
+            return
+        self.SaveNs(ns)                      # test what was typed, not what was saved before
+        values = self.Gather(ns)
+        self.Say(ns, "Testing…", C.TEXT_DIM)
+        relay = _Relay()
+
+        def Worker():
+            try:
+                res = run_fn(values)
+                if isinstance(res, tuple) and len(res) == 2:
+                    ok, msg = bool(res[0]), str(res[1])
+                else:
+                    ok, msg = bool(res), str(res)
+            except Exception as e:
+                ok, msg = False, str(e)
+            relay.plugin_test.emit(ns, ok, msg)
+
+        threading.Thread(target=Worker, daemon=True).start()
+
+    def OnTestDone(self, ns: str, ok: bool, msg: str) -> None:
+        try:
+            self.Say(ns, msg, C.GREEN if ok else C.RED)
+        except RuntimeError:
+            pass
 
 
 class SettingsOverlay(_HudOverlay):
     """Every setting in one window: a sidebar of sections and the chosen page.
 
-    Pages are built when first opened. The older panels (Brain, voice and audio,
-    look, memory, plugins) are hosted as they are, so their own save buttons and
-    logic keep working; their CLOSE buttons close this window instead."""
+    Pages are built when first opened. Most pages are native and save as soon
+    as something changes. The Brain panel (ProvidersOverlay) is hosted with
+    hosted=True and keeps its own Save & apply."""
 
     closed = pyqtSignal()
 
@@ -4281,6 +4096,7 @@ class SettingsOverlay(_HudOverlay):
             QScrollBar:vertical {{ background: transparent; width: 8px; margin: 0; }}
             QScrollBar::handle:vertical {{ background: {C.BORDER_B}; border-radius: 4px; min-height: 30px; }}
             QScrollBar::add-line, QScrollBar::sub-line {{ height: 0; }}
+            QScrollBar::add-page, QScrollBar::sub-page {{ background: none; }}
         """)
         holder = QWidget()
         holder.setStyleSheet("background: transparent;")
@@ -4354,7 +4170,7 @@ class SettingsOverlay(_HudOverlay):
         # account (isHidden() is False), so nothing is rebuilt.
         if (ev.type() == ev.Type.Hide and not self._closing and obj.isHidden()
                 and hasattr(obj, "_settings_key")):
-            QTimer.singleShot(0, self, lambda k=obj._settings_key: self._Rebuild(k))
+            _Later(0, self, lambda k=obj._settings_key: self._Rebuild(k))
         return False
 
     def _Rebuild(self, key: str) -> None:
@@ -4420,10 +4236,19 @@ class MainWindow(QMainWindow):
         self._assistant_name: str = (_cfg.get("assistant_name") or "ULTRON").strip()
         _display = self._assistant_name.upper()
 
-        # Apply the saved UI colour BEFORE panels/stylesheets are built
-        _ui_color = (_cfg.get("ui_color") or "").strip()
-        if _ui_color and _ui_color.lower() != DEFAULT_UI_COLOR:
-            ApplyUiAccent(_ui_color)
+        # Apply the saved colour BEFORE panels/stylesheets are built.
+        from Interface import Accents
+        # Only the saved choice counts: a hex left by the old colour wheel does
+        # not, so anyone who has not picked a swatch gets the default (Gold).
+        self._accent = Accents.Of(_cfg.get("accent"))
+        self._wallpaper_colour = ""
+        self._wallpaper_seen = None
+        self._ApplyAccentColours(retheme=False)
+        # Living colours move by themselves: look again every few seconds.
+        self._accent_timer = QTimer(self)
+        self._accent_timer.timeout.connect(self.TickAccent)
+        if self._accent.living:
+            self._accent_timer.start(self._AccentStep())
 
         self.setWindowTitle(f"{_display} — {APP_VERSION}")
         self.setMinimumSize(_MIN_W, _MIN_H)
@@ -4446,7 +4271,6 @@ class MainWindow(QMainWindow):
         self.ptt_hold          = None   # callable: (held: bool) -> None — windowed chord
         self._muted            = False
         self._current_file: str | None = None
-        self._customize_overlay: CustomizeOverlay | None = None
 
         central = QWidget()
         central.setStyleSheet(f"background: {C.BG};")
@@ -5285,13 +5109,6 @@ class MainWindow(QMainWindow):
         if self._overlay and self._overlay.isVisible():
             ow, oh = 460, 390
             self._overlay.setGeometry(
-                (cw.width()  - ow) // 2,
-                (cw.height() - oh) // 2,
-                ow, oh,
-            )
-        if self._customize_overlay and self._customize_overlay.isVisible():
-            ow, oh = CustomizeOverlay._OW, CustomizeOverlay._OH
-            self._customize_overlay.setGeometry(
                 (cw.width()  - ow) // 2,
                 (cw.height() - oh) // 2,
                 ow, oh,
@@ -6300,30 +6117,6 @@ class MainWindow(QMainWindow):
 
     # ── Customization ────────────────────────────────────────────────────────────
 
-    def OpenCustomize(self):
-        cfg = ReadFullConfig()
-        if self._customize_overlay:
-            self._customize_overlay.hide()
-        cw = self.centralWidget()
-        ov = CustomizeOverlay(
-            cfg.get("assistant_name", "ULTRON") or "ULTRON",
-            cfg.get("user_name", ""),
-            cfg.get("ui_color", "") or DEFAULT_UI_COLOR,
-            cfg.get("voice_name", ""),
-            parent=cw,
-        )
-        ow, oh = CustomizeOverlay._OW, CustomizeOverlay._OH
-        oh = min(oh, cw.height() - 16)
-        ov.setGeometry(
-            (cw.width()  - ow) // 2,
-            (cw.height() - oh) // 2,
-            ow, oh,
-        )
-        ov.on_preview = self.PreviewUiColor
-        ov.saved.connect(self.ApplyNameUpdate)
-        ov.show()
-        self._customize_overlay = ov
-
     def PreviewUiColor(self, hex_color: str):
         """Live preview — paints the whole interface the new colour (does NOT write to config)."""
         old = CurrentPalette()
@@ -6399,9 +6192,9 @@ class MainWindow(QMainWindow):
         sections = [
             ("general", "◎", "General", self.BuildGeneralPage),
             ("brain", "✦", "Brain", self.BuildBrainPage),
-            ("voice", "♪", "Voice & audio", lambda p: self._Hosted(AudioDeviceOverlay(parent=p), "picked", self.OnAudioDevicesApplied)),
-            ("look", "◐", "Look & name", self.BuildLookPage),
-            ("memory", "◉", "Memory", lambda p: MemoryOverlay(parent=p)),
+            ("voice", "♪", "Voice & audio", self.BuildVoicePage),
+            ("look", "◐", "Look & name", lambda p: LookPage(self, p)),
+            ("memory", "◉", "Memory", lambda p: MemoryPage(self._assistant_name, p)),
             ("plugins", "⊞", "Plugins", self.BuildPluginsPage),
             ("usage", "▤", "Usage", lambda p: UsagePage(p)),
             ("system", "▣", "System", lambda p: SystemPage(p)),
@@ -6421,10 +6214,118 @@ class MainWindow(QMainWindow):
         h = min(700, cw.height() - _TOP_H - 20)
         ov.setGeometry((cw.width() - w) // 2, _TOP_H + max(0, (cw.height() - _TOP_H - h) // 2 - 10), w, h)
 
-    @staticmethod
-    def _Hosted(panel, signal: str, slot):
-        getattr(panel, signal).connect(slot)
-        return panel
+    def QueueReconnect(self, why: str, fresh: bool = False) -> None:
+        """Reconnect the session shortly after a setting changes.
+
+        Settings save the moment they are changed, so several quick changes
+        (two switches, then a device) would each cost a reconnect. Waiting a
+        beat turns them into one. `fresh` (a new voice) starts a new
+        conversation, and wins over keeping the old one."""
+        self._reconnect_fresh = getattr(self, "_reconnect_fresh", False) or fresh
+        self._reconnect_why = why
+        timer = getattr(self, "_reconnect_timer", None)
+        if timer is None:
+            timer = QTimer(self)
+            timer.setSingleShot(True)
+            timer.timeout.connect(self._DoReconnect)
+            self._reconnect_timer = timer
+        timer.start(900)
+
+    def _DoReconnect(self) -> None:
+        fresh = getattr(self, "_reconnect_fresh", False)
+        why = getattr(self, "_reconnect_why", "") or "settings"
+        self._reconnect_fresh = False
+        if fresh:
+            if self.on_voice_change:
+                self.on_voice_change()
+        elif self.on_audio_device_change:
+            try:
+                self.on_audio_device_change(why)
+            except TypeError:               # an older handler that takes no reason
+                self.on_audio_device_change()
+
+    # ── Colour (the phone's accents: Interface/Accents.py) ─────────────────
+
+    def SetAccent(self, key: str) -> None:
+        """Choose a colour from Settings › Look & name: applied now, remembered."""
+        from Interface import Accents
+        self._accent = Accents.Of(key)
+        self._wallpaper_seen = None
+        self._ApplyAccentColours()
+        if self._accent.living:
+            self._accent_timer.start(self._AccentStep())
+        else:
+            self._accent_timer.stop()
+        try:
+            from Brain.Settings import PatchConfig
+            PatchConfig(accent=self._accent.key, ui_color=C.PRI)
+        except Exception as e:
+            self._log.AppendLog(f"ERR: Could not save the colour — {e}")
+
+    def _AccentStep(self) -> int:
+        # The phone moves its screens on every 5 s; the wallpaper changes rarely.
+        return 60_000 if self._accent.key == "CHAMELEON" else 5_000
+
+    def TickAccent(self) -> None:
+        if self._accent.living:
+            self._ApplyAccentColours()
+
+    def _ApplyAccentColours(self, retheme: bool = True) -> None:
+        """Paint the interface in the current accent, as it is right now."""
+        from Interface import Accents
+        wall = self.WallpaperColour() if self._accent.key == "CHAMELEON" else ""
+        main, second = Accents.At(self._accent, wallpaper=wall)
+        if not self._accent.blends:
+            second = ""
+        old = CurrentPalette()
+        if main.lower() == C.PRI.lower() and second == C.SECOND:
+            return
+        ApplyUiAccent(main)
+        SetAccentSecond(second)
+        if retheme:
+            RethemeAllWidgets(old, CurrentPalette())
+
+    def WallpaperColour(self) -> str:
+        """The desktop wallpaper's colour, for Chameleon: the average of its
+        colourful parts, made bright enough to glow on black. Re-read only
+        when the wallpaper file changes."""
+        from Interface import Accents
+        path = ""
+        if _OS == "Windows":
+            try:
+                import ctypes
+                buf = ctypes.create_unicode_buffer(520)
+                ctypes.windll.user32.SystemParametersInfoW(0x73, 520, buf, 0)   # SPI_GETDESKWALLPAPER
+                path = buf.value
+            except Exception:
+                path = ""
+        try:
+            stamp = (path, os.path.getmtime(path)) if path else None
+        except OSError:
+            stamp = None
+        if stamp is not None and stamp == self._wallpaper_seen and self._wallpaper_colour:
+            return self._wallpaper_colour
+        self._wallpaper_seen = stamp
+        colour = ""
+        img = QPixmap(path).toImage() if path else None
+        if img is not None and not img.isNull():
+            small = img.scaled(48, 27)
+            tot, rr, gg, bb = 0.0, 0.0, 0.0, 0.0
+            for y in range(small.height()):
+                for x in range(small.width()):
+                    c = small.pixelColor(x, y)
+                    w = 0.05 + c.saturationF() * c.valueF()     # colourful parts count most
+                    tot += w
+                    rr += c.redF() * w
+                    gg += c.greenF() * w
+                    bb += c.blueF() * w
+            if tot > 0:
+                l, a, b = Accents.Lab("#{:02x}{:02x}{:02x}".format(
+                    int(rr / tot * 255), int(gg / tot * 255), int(bb / tot * 255)))
+                chroma = min(0.17, max(0.07, math.hypot(a, b) * 1.8))
+                colour = Accents.Oklch(0.80, chroma, math.degrees(math.atan2(b, a)))
+        self._wallpaper_colour = colour or "#29d8ff"     # Blue until it is known
+        return self._wallpaper_colour
 
     def BuildGeneralPage(self, parent):
         from Brain.Settings import GetBriefEnabled, GetPushToTalkEnabled
@@ -6476,34 +6377,33 @@ class MainWindow(QMainWindow):
 
     def BuildBrainPage(self, parent):
         try:
-            ov = ProvidersOverlay(parent=parent)
+            ov = ProvidersOverlay(parent=parent, hosted=True)
         except Exception as e:
             return _Text(f"The Brain settings could not open: {e}", 10, C.TEXT_MED, wrap=True)
         ov.changed.connect(self.OnProvidersApplied)
+        ov.live_tuned.connect(lambda: self.QueueReconnect("Gemini Live options"))
         return ov
 
-    def BuildLookPage(self, parent):
-        cfg = ReadFullConfig()
-        ov = CustomizeOverlay(
-            cfg.get("assistant_name", "ULTRON") or "ULTRON",
-            cfg.get("user_name", ""),
-            cfg.get("ui_color", "") or DEFAULT_UI_COLOR,
-            cfg.get("voice_name", ""),
-            parent=parent,
-        )
-        ov.on_preview = self.PreviewUiColor
-        ov.saved.connect(self.ApplyNameUpdate)
-        return ov
+    def BuildVoicePage(self, parent):
+        page = VoicePage(self._assistant_name, parent)
+        page.devices_changed.connect(self.OnAudioDevicesApplied)
+        page.voice_changed.connect(self.OnVoicePicked)
+        return page
+
+    def OnVoicePicked(self) -> None:
+        from Brain.Settings import GetVoice
+        self._log.AppendLog(f"SYS: Voice set — {GetVoice()}")
+        self.QueueReconnect("new voice", fresh=True)
 
     def BuildPluginsPage(self, parent):
         plugins = self.get_plugins() if self.get_plugins else []
         sections = self.get_plugin_settings() if self.get_plugin_settings else []
-        out = [PluginManagerOverlay(plugins, parent=parent)]
-        if sections:
-            out.append(PluginSettingsOverlay(sections, parent=parent))
-        return out
+        page = PluginsPage(plugins, sections, self._assistant_name, parent)
+        page.changed.connect(lambda: self.QueueReconnect("plugin change"))
+        return page
 
     def BuildAboutPage(self, parent):
+        from Interface.Hotkey import ChordLabel
         page = QWidget(parent)
         page.setStyleSheet("background: transparent;")
         lay = QVBoxLayout(page)
@@ -6517,53 +6417,46 @@ class MainWindow(QMainWindow):
                           "and can use your apps, files, the web and your screen.", 9,
                           C.TEXT_MED, wrap=True))
         lay.addWidget(card)
+
         card, c = _Card()
         c.addWidget(_Caption("Shortcuts"))
-        for k, v in (("F4", "Mute or unmute"), ("Esc", "Stop talking / close a panel"),
-                     ("F11", "Full screen")):
+        for k, v in (("F4", "Mute or unmute"), ("Esc", "Stop talking, or close a panel"),
+                     ("F11", "Full screen"), (ChordLabel(), "Hold to talk (when push-to-talk is on)")):
             row = QHBoxLayout()
-            row.addWidget(_Text(k, 10, C.WHITE, QFont.Weight.DemiBold))
-            row.addSpacing(20)
+            key = _Text(k, 10, C.WHITE, QFont.Weight.DemiBold)
+            key.setFixedWidth(110)
+            row.addWidget(key)
             row.addWidget(_Text(v, 10, C.TEXT_MED), 1)
             c.addLayout(row)
+        lay.addWidget(card)
+
+        card, c = _Card()
+        head = QHBoxLayout()
+        head.addWidget(_Caption("Your files"), 1)
+        folder = _GhostButton("Open folder")
+        folder.clicked.connect(lambda: _OpenFolder(BaseDir()))
+        head.addWidget(folder)
+        c.addLayout(head)
+        for label, rel in (("Settings and keys", "Config/ApiKeys.json"),
+                           ("Memory", "Brain/LongTerm.json"),
+                           ("Usage", "Brain/Usage.json")):
+            row = QHBoxLayout()
+            name = _Text(label, 10, C.TEXT_MED)
+            name.setFixedWidth(150)
+            row.addWidget(name)
+            row.addWidget(_Text(rel, 9, C.TEXT), 1)
+            c.addLayout(row)
+        c.addWidget(_Hint("All of these stay on this computer and are left out of git."))
         lay.addWidget(card)
         return page
 
     # ── Audio devices ────────────────────────────────────────────────────────
 
-    def OpenAudioDevices(self):
-        ov = AudioDeviceOverlay(parent=self.centralWidget())
-        ov.picked.connect(self.OnAudioDevicesApplied)
-        self.CentreOverlay(ov)
-        self._audio_overlay = ov            # keep a reference so it isn't GC'd
-
     def OnAudioDevicesApplied(self):
         self._log.AppendLog("SYS: Audio devices updated.")
-        if self.on_audio_device_change:
-            self.on_audio_device_change()
+        self.QueueReconnect("audio device")
 
     # ── Engine & providers ───────────────────────────────────────────────────
-
-    def OpenProviders(self):
-        """Open the engine panel. Everything it needs is imported on this call.
-
-        A failure here must not take the drawer with it — the folder can be
-        deleted, which is the point of it being a folder, and the honest answer
-        to that is a line in the log rather than a traceback.
-        """
-        try:
-            ov = ProvidersOverlay(parent=self.centralWidget())
-        except ImportError:
-            self._log.AppendLog(
-                "SYS: The Brain settings are not installed — "
-                "the assistant runs on Gemini Live.")
-            return
-        except Exception as e:
-            self._log.AppendLog(f"SYS: Provider settings unavailable: {e}")
-            return
-        ov.changed.connect(self.OnProvidersApplied)
-        self.CentreOverlay(ov)
-        self._providers_overlay = ov        # keep a reference so it isn't GC'd
 
     def OnProvidersApplied(self):
         """Rebuild the session so the new engine takes over.
@@ -6573,15 +6466,7 @@ class MainWindow(QMainWindow):
         transcript across such a rebuild through session resumption, and one
         path that is known to work is better than two that look alike."""
         self._log.AppendLog("SYS: Brain settings saved — reconnecting.")
-        if self.on_audio_device_change:
-            self.on_audio_device_change()
-
-    # ── Memory panel ─────────────────────────────────────────────────────────
-
-    def OpenMemoryPanel(self):
-        ov = MemoryOverlay(parent=self.centralWidget())
-        self.CentreOverlay(ov)
-        self._memory_overlay = ov
+        self.QueueReconnect("Brain settings")
 
     # ── Irreversible-action confirmation ─────────────────────────────────────
 
@@ -6609,35 +6494,6 @@ class MainWindow(QMainWindow):
             resolve(bool(accepted))
         except Exception as e:
             self._log.AppendLog(f"ERR: Confirmation failed — {e}")
-
-    def OpenPluginManager(self):
-        plugins = self.get_plugins() if self.get_plugins else []
-        cw = self.centralWidget()
-        ov = PluginManagerOverlay(plugins, parent=cw)
-        ov.adjustSize()
-        ov.setGeometry(
-            (cw.width()  - ov.width())  // 2,
-            (cw.height() - ov.height()) // 2,
-            ov.width(), ov.height(),
-        )
-        ov.show()
-        ov.raise_()
-        self._plugin_manager_overlay = ov   # keep a reference so it isn't GC'd
-
-    def OpenPluginSettings(self):
-        sections = self.get_plugin_settings() if self.get_plugin_settings else []
-        cw = self.centralWidget()
-        ov = PluginSettingsOverlay(sections, parent=cw)
-        ow = PluginSettingsOverlay._OW
-        oh = min(560, cw.height() - 16)
-        ov.setGeometry(
-            (cw.width()  - ow) // 2,
-            (cw.height() - oh) // 2,
-            ow, oh,
-        )
-        ov.show()
-        ov.raise_()
-        self._plugin_settings_overlay = ov   # keep a reference so it isn't GC'd
 
     # ── Clipboard intelligence ───────────────────────────────────────────────────
 

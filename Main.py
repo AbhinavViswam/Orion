@@ -710,12 +710,13 @@ class UltronLive:
         voice is a deliberate, rare act; losing it on a dropped packet was not."""
         self.RequestReconnect(keep_context=False, reason="new voice")
 
-    def OnAudioDeviceChange(self):
-        """Microphone or speaker changed. Both streams are opened inside the
-        session TaskGroup, so they can only be re-opened by rebuilding it —
-        but the conversation is kept, which is the whole reason resumption
-        landed before this feature did."""
-        self.RequestReconnect(keep_context=True, reason="audio device")
+    def OnAudioDeviceChange(self, reason: str = "audio device"):
+        """A setting that is fixed at connect time changed: the microphone or
+        speakers, the Brain, a Gemini Live option or a plugin. Both audio
+        streams and the tool list live inside the session TaskGroup, so they
+        can only be re-opened by rebuilding it, but the conversation is kept,
+        which is the whole reason resumption landed before this feature did."""
+        self.RequestReconnect(keep_context=True, reason=reason or "settings")
 
     async def WatchReconnect(self):
         """Session-scoped task: when a voluntary reconnect is requested, raise a

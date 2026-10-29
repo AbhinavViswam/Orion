@@ -49,7 +49,7 @@ To get a desktop icon, open **⚙ Setup → Create desktop shortcut**.
 | Full screen | **F11** |
 | Conversation | ☰ (top right) opens the conversation drawer. It is open by default. |
 | System load | The rings in the top bar (CPU, RAM, GPU) and network speed. Click them for details. |
-| Settings | ⚙ opens one window: General, Brain, Voice & audio, Look & name, Memory, Plugins, Usage, System, About. |
+| Settings | ⚙ opens one window: General, Brain, Voice & audio, Look & name, Memory, Plugins, Usage, System, About. Changes save as you make them; ones the live session needs (devices, voice, Gemini options, plugins) reconnect for a moment. Only Brain's mode and background requests wait for **Save & apply**. |
 
 Push-to-talk is in Settings › General if you'd rather hold a key to speak.
 
@@ -113,7 +113,7 @@ models and whichever provider the user picked in ⚙ › Brain.
 ```
 Main.py            the assistant: Gemini Live session, mic, speaker, tool calls
 Setup.py           one-time install
-Interface/         the window (Window.py), the reactor, hotkeys, app identity
+Interface/         the window (Window.py), the reactor, colours (Accents.py), hotkeys, app identity
 Brain/             Gemini calls, the prompt, memory, settings, confirm, undo
 Voice/             microphone devices, speech in and out, echo guard
 Engines/           other engines: OpenAI-compatible LLMs, Whisper, Piper, ElevenLabs
