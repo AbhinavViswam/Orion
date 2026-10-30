@@ -163,6 +163,60 @@ class TestTools(_Base):
         self.assertEqual(spoken, "10:00 · phone: Asked the weather")
 
 
+class TestConfirmTitles(_Base):
+    """A confirmation naming a caller or a contact tells Gemini only that something is on screen."""
+    def Ask(self, key, title):
+        from Brain import Confirm
+        shown = []
+        Confirm.bind(lambda t, d: shown.append(t), lambda: None)
+        try:
+            said = Confirm.request(key, title, "", lambda: "ok")
+        finally:
+            Confirm.resolve(False)
+            Confirm.bind(None, None)
+        self.assertEqual(shown, [title])                 # the screen always shows it
+        return said
+
+    def TestPrivateTitleStaysOnScreen(self):
+        Privacy.Save(on=True)
+        said = self.Ask("call_take_over", "Take the call from Rahul?")
+        self.assertNotIn("Rahul", said)
+        self.assertIn("only on screen", said)
+
+    def TestOtherwiseGeminiHearsIt(self):
+        Privacy.Save(on=False)
+        self.assertIn("Rahul", self.Ask("call_take_over", "Take the call from Rahul?"))
+        Privacy.Save(on=True)
+        self.assertIn("calc.py", self.Ask("self_repair", "Apply a fix to calc.py?"))
+
+
+class TestSessionSummary(_Base):
+    """Private mode: the laptop's own model writes the end-of-session summary."""
+    def Run(self, on, installed=True, local_says="Talked about dinner plans."):
+        import Main
+        live = Main.OrionLive.__new__(Main.OrionLive)
+        live._session_log = ["User: hi", "Orion: hello", "User: dinner?", "Orion: pasta"]
+        asked, saved = [], []
+        Privacy.Save(on=on)
+        with mock.patch.object(Main.OrionLive, "SummariseLocally", staticmethod(lambda p: (asked.append("local"), local_says)[1])), \
+             mock.patch.object(LocalBrain, "Installed", lambda refresh=False: installed), \
+             mock.patch("Brain.Gemini.text", lambda *a, **k: (asked.append("gemini"), "From Gemini.")[1]), \
+             mock.patch.object(Main, "SaveSessionSummary", lambda s, lang="": saved.append(s)), \
+             mock.patch.object(Main, "LoadMemory", lambda: {}):
+            asyncio.run(Main.OrionLive._SaveSessionSummary(live))
+        return asked, saved
+
+    def TestPrivateUsesTheLaptop(self):
+        self.assertEqual(self.Run(True), (["local"], ["Talked about dinner plans."]))
+
+    def TestNotPrivateUsesGemini(self):
+        self.assertEqual(self.Run(False), (["gemini"], ["From Gemini."]))
+
+    def TestNoLocalModelFallsBackToGemini(self):
+        self.assertEqual(self.Run(True, installed=False), (["gemini"], ["From Gemini."]))
+        self.assertEqual(self.Run(True, local_says=""), (["local", "gemini"], ["From Gemini."]))
+
+
 class TestDeskRunner(_Base):
     def TestAPrivateAnswerGoesStraightBack(self):
         from System.PhoneTasks import PhoneTasks

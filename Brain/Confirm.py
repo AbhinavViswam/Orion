@@ -64,6 +64,9 @@ _show_cb: Optional[Callable[[str, str], None]] = None
 _hide_cb: Optional[Callable[[], None]] = None
 _log_cb:  Optional[Callable[[str], None]] = None
 
+# Confirmations whose titles name people or messages (Brain/Privacy.py).
+PRIVATE_KEYS = {"call_take_over", "phone_tap"}
+
 
 def bind(show, hide, log=None) -> None:
     """Wire this module to the HUD. Called once from Main.py at startup."""
@@ -105,8 +108,18 @@ def request(key: str, title: str, detail: str, run: Callable[[], str]) -> str:
         return f"Could not ask for confirmation: {e}. Nothing was done."
 
     _log(f"SYS: Awaiting confirmation — {title}")
+    shown = title
+    if key in PRIVATE_KEYS:
+        # A caller's name, a phone step naming a contact: on screen only in
+        # private mode, like the phone's confirmation titles.
+        try:
+            from Brain import Privacy
+            if Privacy.Active():
+                shown = "something private (only on screen)"
+        except Exception:
+            pass
     return (
-        f"[CONFIRMATION_PENDING] I have put a confirmation on screen for: {title}. "
+        f"[CONFIRMATION_PENDING] I have put a confirmation on screen for: {shown}. "
         f"Say ONE short sentence in the user's own language telling them you need "
         f"them to confirm it on the HUD before you do it. Do not claim it is done."
     )

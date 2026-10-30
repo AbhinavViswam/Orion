@@ -2189,6 +2189,21 @@ class OrionLive:
 
     # ── Session memory ──────────────────────────────────────────────────────────
 
+    @staticmethod
+    def SummariseLocally(prompt: str) -> str:
+        """Blocking: one answer from the laptop's own model. Stopped again after
+        if Gemini is the brain, so it doesn't sit in memory for one summary."""
+        from Brain import Gemini
+        try:
+            reply = Gemini.ProviderCall(Gemini.LOCAL_RUNG, prompt, None, 120_000)
+            return (getattr(reply, "text", "") or "").strip()
+        except Exception as e:
+            print(f"[Memory] local session summary failed ({e}); using Gemini.")
+            return ""
+        finally:
+            if not LocalBrain.ACTIVE:
+                LocalBrain.Release()
+
     async def _SaveSessionSummary(self) -> None:
         """Summarise the current session in 1-2 sentences and save to LongTerm.json."""
         log = self._session_log
@@ -2209,9 +2224,15 @@ class OrionLive:
         )
         try:
             from Brain import Gemini
-            summary = await asyncio.to_thread(
-                Gemini.text, prompt, Gemini.SMART, None, 30_000,
-            )
+            summary = ""
+            if Privacy.On() and LocalBrain.Installed():
+                # Private mode: the laptop's own model writes it (plan §6). On-device
+                # mode gets here through Gemini.text below, whose only rung is local.
+                summary = await asyncio.to_thread(self.SummariseLocally, prompt)
+            if not summary:
+                summary = await asyncio.to_thread(
+                    Gemini.text, prompt, Gemini.SMART, None, 30_000,
+                )
             if summary:
                 SaveSessionSummary(summary, lang)
         except Exception as e:
