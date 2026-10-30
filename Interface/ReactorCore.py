@@ -108,8 +108,9 @@ class Reactor(_BaseReactor):
     def step(self, dt: float, state: int, level: float) -> None:
         super().step(dt, state, level)
         dt = max(0.0, min(0.1, dt))
-        want_speed = 1.8 if state == THINKING else 0.25 if state in (MUTED, ASLEEP) else 1.0
-        want_scale = 0.9 if state in (MUTED, ASLEEP) else 1.05 if state == SPEAKING else 1.0
+        # Muted moves exactly like unmuted: only its colour fades (the grey/alpha knobs).
+        want_speed = 1.8 if state == THINKING else 0.25 if state == ASLEEP else 1.0
+        want_scale = 0.9 if state == ASLEEP else 1.05 if state == SPEAKING else 1.0
         self._speed = Approach(self._speed, want_speed, 9.0, dt)
         self._scale = Approach(self._scale, want_scale, 9.0, dt)
         self._sim += dt * self._speed

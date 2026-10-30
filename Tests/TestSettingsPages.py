@@ -158,6 +158,29 @@ class TestPluginsPage(_Base):
             page.SaveNs("printer", say=True)
         self.assertEqual(saved["printer"]["host"], "octopi")
 
+    def TestStatusLineButtonLabelAndUnsavedCode(self):
+        state = {"on": False}
+        sec = {"namespace": "link", "title": "Link", "values": {},
+               "fields": [{"key": "status", "label": "Status", "type": "status",
+                           "get": lambda: ("Connected", True) if state["on"] else ("Not connected", False)},
+                          {"key": "code", "label": "Code", "save": False}],
+               "action": {"label": lambda: "Disconnect" if state["on"] else "Connect", "run": lambda v: True}}
+        page = self.W.PluginsPage([], [sec])
+        texts = lambda: [l.text() for l in page.findChildren(self.W.QLabel)]
+        buttons = lambda: [b.text() for b in page.findChildren(self.W.QPushButton)]
+        self.assertIn("Not connected", texts())
+        self.assertIn("Connect", buttons())
+        state["on"] = True
+        page.RefreshLive()
+        self.assertIn("Connected", texts())
+        self.assertIn("Disconnect", buttons())
+        self.assertNotIn("status", page.Gather("link"))
+        page._widgets[("link", "code")].setText("123456")
+        saved = {}
+        with mock.patch("Brain.Settings.SavePluginConfig", lambda ns, v: saved.update({ns: v})):
+            page.SaveNs("link")
+        self.assertEqual(saved["link"], {})
+
 
 class _FakeWindow:
     def __init__(self):
@@ -285,10 +308,42 @@ class TestBrainPage(_Base):
         self.assertIn("Save && apply", texts)          # && shows as one "&"
         self.assertNotIn("Close", texts)
 
+    def TestCachedVoiceListAnswersAtOnce(self):
+        """Piper's voice list is cached, so its prefetch calls back at once,
+        inside the panel's setup. That crashed with "no attribute '_edits'"
+        when switching to On-device (2026-10-30)."""
+        from Engines import TtsPiper
+        with mock.patch.object(TtsPiper, "_catalog", {"en_GB-alan-medium": {"language": "en_GB"}}):
+            ov = self.W.ProvidersOverlay(hosted=True)
+            ov.show()
+            ov.OnLiveReady()
+        self.assertTrue(hasattr(ov, "_edits"))
+
     def TestModeCardsWrapTheirText(self):
         ov = self.W.ProvidersOverlay(hosted=True)
         self.assertIsInstance(ov._card_gemini, self.W._ChoiceCard)
         self.assertTrue(ov._card_gemini._body.wordWrap())
+
+    def TestFourBrainModes(self):
+        """Auto / On-device / Gemini only / My own setup (System/LocalBrain.py)."""
+        from System import LocalBrain
+        with mock.patch("Brain.Settings.GetProviderMode", lambda: "gemini"), \
+             mock.patch("Brain.Settings.GetBrainMode", lambda: "auto"), \
+             mock.patch.object(LocalBrain, "Installed", lambda refresh=False: False):
+            ov = self.W.ProvidersOverlay(hosted=True)
+            self.assertEqual(ov._mode, "auto")
+            self.assertTrue(ov._card_auto._on)
+            self.assertIn("Not downloaded", ov._status["local_brain"].text())
+            ov.SetMode("local")
+            Pump(20)
+            self.assertTrue(ov._card_device._on)
+            self.assertFalse(ov._card_auto._on)
+            texts = " ".join(lb.text() for lb in ov.findChildren(self.W.QLabel))
+            self.assertIn("Nothing goes to Gemini", texts)
+            saved = []
+            with mock.patch("Brain.Settings.SaveProviders", lambda **k: saved.append(k)):
+                ov._Apply()
+        self.assertEqual((saved[0]["mode"], saved[0]["brain"]), ("gemini", "local"))
 
     def TestLiveOptionsSaveAndAskForReconnect(self):
         calls, asked = [], []

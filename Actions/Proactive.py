@@ -69,7 +69,8 @@ class ProactiveEngine:
         elif 18 <= hour < 23:  period = "evening"
         else:                  period = "late night"
 
-        mem_str = FormatMemoryForPrompt(memory) or "(no stored user data)"
+        from Brain import Privacy           # private mode: the private kinds stay off Gemini
+        mem_str = FormatMemoryForPrompt(Privacy.ForGemini(memory)) or "(no stored user data)"
 
         # Rotating context focus (cycles every trigger)
         focus_index = self._rotation % 3

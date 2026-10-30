@@ -1,0 +1,5 @@
+{
+  "where": "the window",
+  "traceback": "Traceback (most recent call last):\n  File \"C:\\DILSHA\\ABHI\\AI ASSISTANTS\\JARVIS\\Orion\\Interface\\Window.py\", line 1756, in OnLiveReady\n    self.RebuildBody()\n    ~~~~~~~~~~~~~~~~^^\n  File \"C:\\DILSHA\\ABHI\\AI ASSISTANTS\\JARVIS\\Orion\\Interface\\Window.py\", line 1972, in RebuildBody\n    self.RememberEdits()\n    ~~~~~~~~~~~~~~~~~~^^\n  File \"C:\\DILSHA\\ABHI\\AI ASSISTANTS\\JARVIS\\Orion\\Interface\\Window.py\", line 2439, in RememberEdits\n    for pid in list(self._edits):\n                    ^^^^^^^^^^^\nAttributeError: 'ProvidersOverlay' object has no attribute '_edits'\n",
+  "at": 1793359821.0680928
+}

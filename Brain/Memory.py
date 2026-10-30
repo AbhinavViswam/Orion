@@ -398,6 +398,8 @@ def AllEntriesForUi() -> list[dict]:
                 "key":      key,
                 "value":    val,
                 "updated":  (entry.get("updated", "") if isinstance(entry, dict) else ""),
+                # Which assistant learned it: JARVIS on the phone, or Orion (missing = Orion's own).
+                "source":   "jarvis" if isinstance(entry, dict) and entry.get("source") == "jarvis" else "orion",
             })
     rows.sort(key=lambda r: (r["updated"] or "0000-00-00"), reverse=True)
     return rows

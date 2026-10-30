@@ -36,7 +36,7 @@ _MODULES: dict[str, tuple[str, ...]] = {
     "llm": ("LlmOpenai",),
     "stt": ("SttWhisper",),
     "tts": ("TtsPiper", "TtsSystem", "TtsElevenlabs"),
-    "engine": ("engine_pipeline",),
+    "engine": ("EnginePipeline",),
 }
 
 _declarations: dict[str, dict] = {}     # id -> PROVIDER, for modules imported so far

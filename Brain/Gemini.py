@@ -597,6 +597,33 @@ def ProviderFirst() -> bool:
     return ProviderSettings()[1]
 
 
+# The laptop's own brain (System/LocalBrain.py) as a rung: the only one in On-device mode,
+# the last one in Auto mode once it's downloaded. Never for SEARCH (no grounding).
+LOCAL_RUNG = PROVIDER_PREFIX + "orion_local"
+
+
+def BrainMode() -> str:
+    try:
+        from System import LocalBrain
+        return LocalBrain.Mode()
+    except Exception:
+        return "auto"
+
+
+def _local_rungs(tier: str, mode: str) -> tuple[str, ...]:
+    if tier == SEARCH:
+        return ()
+    if mode == "local":
+        return (LOCAL_RUNG,)
+    if mode == "auto":
+        try:
+            from System import LocalBrain
+            return (LOCAL_RUNG,) if LocalBrain.Installed() else ()
+        except Exception:
+            return ()
+    return ()
+
+
 def ToOpenaiMessages(contents, config) -> tuple[list[dict], Optional[float]]:
     """REST `contents` -> OpenAI `messages`, with the system instruction split
     out of the config where one was given.
@@ -634,13 +661,18 @@ def ProviderCall(model: str, contents, config, timeout_ms: int):
     from Brain.Settings import GetProviderConfig
     from Engines import Registry
 
-    pid = model[len(PROVIDER_PREFIX):]
-    cfg = GetProviderConfig(pid)
-    missing = Registry.MissingFields(pid, cfg)
-    if missing:
-        raise RuntimeError(f"404 not configured: {', '.join(missing)}")
-
-    llm = Registry.build(pid, cfg)
+    if model == LOCAL_RUNG:
+        from System import LocalBrain
+        LocalBrain.StartServer()
+        LocalBrain.EnsureModel()
+        llm = Registry.build(LocalBrain.LLM_ID, LocalBrain.LlmConfig())
+    else:
+        pid = model[len(PROVIDER_PREFIX):]
+        cfg = GetProviderConfig(pid)
+        missing = Registry.MissingFields(pid, cfg)
+        if missing:
+            raise RuntimeError(f"404 not configured: {', '.join(missing)}")
+        llm = Registry.build(pid, cfg)
     messages, temperature = ToOpenaiMessages(contents, config)
     text_out, _calls = llm.complete(
         messages, tools=None,
@@ -678,8 +710,23 @@ def call(contents, tier: str = FAST, config=None,
         ladder = (rungs + tuple(ladder)) if ProviderFirst() \
             else (tuple(ladder) + rungs)
 
+    # On-device mode: nothing goes to any cloud AI, so the laptop's own brain is the
+    # whole ladder. Auto mode: it's the last rung, after every Gemini model.
+    mode = BrainMode()
+    local = _local_rungs(tier, mode)
+    if mode == "local":
+        if not local:
+            print("[Gemini] On-device mode: this needs Gemini, so it isn't done")
+            return None
+        ladder = rungs = local
+    elif local:
+        ladder = tuple(ladder) + local
+        rungs = rungs + local
+
     resolved_key = key or api_key()
-    if not resolved_key:
+    if mode == "local":
+        pass
+    elif not resolved_key:
         # A provider does not need a Gemini key. Before this, a missing key
         # meant every one-shot call in the app failed — which is exactly the
         # situation somebody configuring another provider is trying to leave.

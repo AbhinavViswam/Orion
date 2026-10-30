@@ -118,6 +118,9 @@ pynvml                       # system_monitor + the HUD's GPU meter (NVIDIA)
 #                                #   the one matching whatever language it just
 #                                #   heard you speak.
 #
+# The laptop's own brain (⚙ › Brain › Auto / On-device, System/LocalBrain.py) uses both, plus Ollama
+# from ollama.com.
+#
 # Left out of the install for the same reason as everything else in this
 # section: together they are several hundred megabytes, and a fresh clone that
 # only ever uses Gemini should not pay for them. Deleting providers/ removes
@@ -127,3 +130,4 @@ pynvml                       # system_monitor + the HUD's GPU meter (NVIDIA)
 # macOS / Linux OS actions (volume, brightness, reminders) shell out to native
 # tools (pactl / brightnessctl / osascript / systemd), so no extra Python
 # packages are needed there — nothing Windows-specific is ever pulled in.
+cryptography>=42      # JARVIS Link (phone): pairing and sealed frames

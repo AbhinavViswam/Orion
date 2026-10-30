@@ -148,6 +148,13 @@ class TestTheCall(unittest.TestCase):
             p = mock.patch.object(CS, name, value)
             p.start()
             self.addCleanup(p.stop)
+        # The real settings, not these tests, decide private mode otherwise —
+        # and private mode skips the summariser these tests hand in.
+        from Brain import Privacy
+        for p in (mock.patch.object(Privacy, "On", lambda: False),
+                  mock.patch.object(CS, "_OnDevice", lambda: False)):
+            p.start()
+            self.addCleanup(p.stop)
         self.addCleanup(shutil.rmtree, self.tmp, True)
         from Brain import Confirm
         self.banners = []

@@ -51,7 +51,7 @@ except Exception as _e:            # noqa: BLE001 - reported, never fatal
     print(f"[Video] playback unavailable ({_e}) — the HUD will not show video.")
 
 from PyQt6.QtWidgets import (
-    QApplication, QComboBox, QFileDialog, QFrame, QHBoxLayout, QLabel, QLineEdit,
+    QApplication, QComboBox, QFileDialog, QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit,
     QMainWindow, QPushButton, QScrollArea, QSizePolicy, QSplitter,
     QGraphicsScene, QGraphicsView,
     QStackedWidget, QTextEdit, QVBoxLayout, QWidget, QProgressBar, QSlider,
@@ -493,6 +493,9 @@ class HudCanvas(QWidget):
         self.right_inset = 0
         self._frame_id = 0
         self._frame = None
+        # The floating reactor (Interface/FloatingReactor.py) shows this same
+        # thread's frames while the window is hidden: one renderer, never two.
+        self.float_on = False
         if ReactorThread is not None:
             try:
                 self._reactor = ReactorThread(self)
@@ -647,7 +650,7 @@ class HudCanvas(QWidget):
             th.level = amp
             first, second, mix = ReactorTint()
             th.tint, th.tint2, th.mix = Qcol(first), Qcol(second), mix
-            th.visible = visible
+            th.visible = visible or self.float_on
             fid, frame = th.frame()
             if fid != self._frame_id and frame is not None:
                 self._frame_id, self._frame = fid, frame
@@ -1519,6 +1522,7 @@ class _WorkerRelay(QObject):
     level_seen = pyqtSignal(int)                # microphone test level, 0-100
     test_result = pyqtSignal(str, bool)         # audio test sentence, good
     plugin_test = pyqtSignal(str, bool, str)    # namespace, ok, message
+    voice_try = pyqtSignal(str, str)            # laptop voice preview: text, colour
 
 
 _relay: _WorkerRelay | None = None
@@ -1592,7 +1596,8 @@ class ProvidersOverlay(_HudOverlay):
         # scrolling, so this panel brings none of its own.
         self._hosted = hosted
         # Imported HERE, on the click — never at startup. See the class docstring.
-        from Brain.Settings import GetPipeline, GetProviderConfig, GetProviderMode, GetSidecarFirst, GetSidecarProvider
+        from Brain.Settings import (GetBrainMode, GetPipeline, GetProviderConfig, GetProviderMode,
+                                    GetSidecarFirst, GetSidecarProvider)
         from Engines import Registry
 
         self._registry = Registry
@@ -1607,18 +1612,9 @@ class ProvidersOverlay(_HudOverlay):
         relay.live_ready.connect(self.OnLiveReady)
         relay.models_ready.connect(self.OnModelsReady)
         relay.status.connect(self.Say)
+        self._relay = relay
         self._model_cache: dict[str, list] = {}
         self._fetching: set = set()
-        for _kind in ("tts", "stt", "llm"):
-            for _decl in Registry.discover(_kind):
-                try:
-                    _mod = __import__(f"Engines.{_decl['_module']}",
-                                      fromlist=["prefetch"])
-                    _pf = getattr(_mod, "prefetch", None)
-                    if _pf:
-                        _pf(relay.live_ready.emit)
-                except Exception:
-                    pass
         self._edits: dict[str, dict] = {}       # provider id -> {key: (widget, Field)}
         self._status: dict[str, QLabel] = {}    # provider id -> status line
         self._more: dict[str, bool] = {}        # provider id -> advanced shown
@@ -1652,21 +1648,33 @@ class ProvidersOverlay(_HudOverlay):
         # A dropdown hides the option you did not choose. This is the one
         # decision on the panel that changes everything below it, and both
         # answers deserve to be readable at the same time.
-        self._mode = GetProviderMode()
-        cards = QHBoxLayout(); cards.setSpacing(10)
+        # auto | local | gemini (the brain modes, like the phone's) | pipeline (My own setup).
+        self._mode = "pipeline" if GetProviderMode() == "pipeline" else GetBrainMode()
+        cards = QGridLayout(); cards.setSpacing(10)
+        self._card_auto = self.ModeCard(
+            "Auto",
+            "Gemini Live, and the laptop's own brain whenever Gemini can't answer "
+            "(offline, out of quota). Switches back by itself.",
+            "auto")
+        self._card_device = self.ModeCard(
+            "On-device",
+            "Only the laptop's own brain. Nothing goes to Gemini or any cloud AI. "
+            "Fewer tools, simpler answers.",
+            "local")
         self._card_gemini = self.ModeCard(
-            "Gemini Live",
+            "Gemini only",
             "One connection carries your voice, its voice, the transcript and "
-            "the tools together. The fastest option — about half a second to "
-            "the first word.",
+            "the tools together. About half a second to the first word.",
             "gemini")
         self._card_local = self.ModeCard(
             "My own setup",
-            "Your choice of hearing, thinking and speaking. Can run entirely on "
-            "this computer, with nothing leaving it. Slower: 1.5 to 4 seconds.",
+            "Your choice of hearing, thinking and speaking, from any provider. "
+            "Overrides the three above.",
             "pipeline")
-        cards.addWidget(self._card_gemini)
-        cards.addWidget(self._card_local)
+        cards.addWidget(self._card_auto, 0, 0)
+        cards.addWidget(self._card_device, 0, 1)
+        cards.addWidget(self._card_gemini, 1, 0)
+        cards.addWidget(self._card_local, 1, 1)
         outer.addLayout(cards)
 
         # ── Body ────────────────────────────────────────────────────────────
@@ -1705,6 +1713,20 @@ class ProvidersOverlay(_HudOverlay):
         outer.addLayout(row)
         self.RefreshCards()
 
+        # Asked LAST: an engine whose list is already cached (Piper) answers at
+        # once, and that redraw needs the panel finished. Asked first, it
+        # crashed the panel with "no attribute '_edits'".
+        for _kind in ("tts", "stt", "llm"):
+            for _decl in Registry.discover(_kind):
+                try:
+                    _mod = __import__(f"Engines.{_decl['_module']}",
+                                      fromlist=["prefetch"])
+                    _pf = getattr(_mod, "prefetch", None)
+                    if _pf:
+                        _pf(relay.live_ready.emit)
+                except Exception:
+                    pass
+
     def BuildScroll(self, outer) -> None:
         """The panel's own scroll area, used only when it floats on its own."""
         self._scroll = QScrollArea()
@@ -1734,12 +1756,12 @@ class ProvidersOverlay(_HudOverlay):
         return card
 
     def RefreshCards(self) -> None:
-        for card in (self._card_gemini, self._card_local):
+        for card in (self._card_auto, self._card_device, self._card_gemini, self._card_local):
             card.SetChecked(card.property("modeValue") == self._mode)
 
     def OnLiveReady(self) -> None:
         """A machine-supplied list has arrived — redraw once so it appears."""
-        if not self.isHidden():
+        if not self.isHidden() and hasattr(self, "_footer"):
             self.RebuildBody()
 
     # ── Asking an endpoint what it has, without being asked to ──────────────
@@ -1965,7 +1987,10 @@ class ProvidersOverlay(_HudOverlay):
             for slot, num, name, what in self._SLOTS:
                 self._body_lay.addWidget(self.SlotBox(slot, num, name, what))
         else:
-            self._body_lay.addWidget(self.LiveOptionsBox())
+            if self._mode in ("auto", "local"):
+                self._body_lay.addWidget(self.LocalBrainBox())
+            if self._mode != "local":
+                self._body_lay.addWidget(self.LiveOptionsBox())
 
         self._body_lay.addWidget(self.SidecarBoxWidget())
         self._body_lay.addStretch(1)
@@ -2189,6 +2214,47 @@ class ProvidersOverlay(_HudOverlay):
         self._more[pid] = not self._more.get(pid)
         self.RememberEdits()
         QTimer.singleShot(0, self.RebuildBody)
+
+    def LocalBrainBox(self) -> QWidget:
+        """The laptop's own brain (System/LocalBrain.py): is it downloaded, and a button to get it."""
+        from System import LocalBrain
+        w, lay = self._Box([_Caption("The laptop's own brain")])
+        lay.addWidget(self._label(
+            "Gemma 4 E2B, the model JARVIS runs on the phone, on this laptop's graphics card. "
+            "Fast commands still answer first. It has a small set of tools and says "
+            "\"I have limited tool access right now\" for the rest.", 8, C.TEXT_DIM))
+        if self._mode == "local":
+            lay.addWidget(self._label(
+                "Nothing goes to Gemini at all. Web search still works: only the search words go out.",
+                8, C.TEXT_DIM))
+        status = self._label("", 8, C.TEXT_DIM)
+        self._status["local_brain"] = status
+        row = QHBoxLayout()
+        row.setSpacing(10)
+        row.addWidget(status, 1)
+        if LocalBrain.Installed(refresh=True):
+            self.Say("local_brain", "✓  Ready on this laptop.", C.GREEN)
+        else:
+            self.Say("local_brain", f"Not downloaded yet (about {LocalBrain.DOWNLOAD_GB:.1f} GB, once).",
+                     C.TEXT_MED)
+            row.addWidget(self.Btn("Download", self.DownloadLocalBrain))
+        lay.addLayout(row)
+        return w
+
+    def DownloadLocalBrain(self) -> None:
+        import threading
+        from System import LocalBrain
+        relay = _Relay()
+        self.Say("local_brain", "Starting the download…", C.TEXT_DIM)
+
+        def Work():
+            try:
+                LocalBrain.Download(lambda text: relay.status.emit("local_brain", text, C.TEXT_DIM))
+                relay.status.emit("local_brain", "✓  Downloaded and ready. Save & apply to use it.", C.GREEN)
+            except Exception as e:
+                relay.status.emit("local_brain", f"✕  Download failed: {str(e)[:120]}", C.RED)
+
+        threading.Thread(target=Work, daemon=True, name="local-brain-download").start()
 
     def LiveOptionsBox(self) -> QWidget:
         """Gemini Live needs no setup, but how it behaves can be tuned. Each
@@ -2487,9 +2553,9 @@ class ProvidersOverlay(_HudOverlay):
         threading.Thread(target=work, daemon=True).start()
 
     def _Apply(self) -> None:
-        from Brain.Settings import GetPipeline, GetProviderMode, SaveProviders
+        from Brain.Settings import GetBrainMode, GetPipeline, GetProviderMode, SaveProviders
 
-        before = (GetProviderMode(), dict(GetPipeline()))
+        before = (GetProviderMode(), GetBrainMode(), dict(GetPipeline()))
 
         # ONE write, not five. See save_providers for what the five cost.
         creds = {pid: self.Values(pid) for pid in list(self._edits)}
@@ -2502,7 +2568,8 @@ class ProvidersOverlay(_HudOverlay):
             creds.setdefault(sidecar_pid, {}).setdefault("catalog", sidecar_eid)
 
         SaveProviders(
-            mode=self._mode,
+            mode="pipeline" if self._mode == "pipeline" else "gemini",
+            brain=None if self._mode == "pipeline" else self._mode,
             pipeline={"stt": self._pipe.get("stt", ""),
                       "llm": self._pipe.get("llm", ""),
                       "tts": self._pipe.get("tts", "")},
@@ -2518,7 +2585,7 @@ class ProvidersOverlay(_HudOverlay):
         except Exception:
             pass
 
-        after = (GetProviderMode(), dict(GetPipeline()))
+        after = (GetProviderMode(), GetBrainMode(), dict(GetPipeline()))
         self.hide()
         # Background-request settings take effect on the next call with no
         # reconnect. Only the conversation engine needs the session rebuilt.
@@ -3241,6 +3308,29 @@ _VOICE_NOTES = {"Charon": "Informative", "Puck": "Upbeat", "Kore": "Firm",
                 "Fenrir": "Excitable", "Aoede": "Breezy"}
 
 
+def PlayLocalVoice(voice: str, say=lambda t: None) -> None:
+    """Blocking: fetch a Piper voice if it isn't here yet, then speak a sample
+    through the chosen speakers. Run off the interface thread."""
+    import numpy as np
+    import sounddevice as sd
+    from Brain.Settings import GetOutputDevice
+    from Engines import TtsPiper
+    from Voice import AudioDevices
+    if voice not in TtsPiper.installed():
+        say("Downloading the voice (once)…")
+        TtsPiper.download(voice)
+    say("Speaking…")
+    tts = TtsPiper.PiperTTS({"voice": voice, "follow_language": "0"})
+    model = tts._load(voice)
+    rate = int(getattr(model.config, "sample_rate", 22050))
+    name = ReadFullConfig().get("assistant_name") or "Orion"
+    pcm = tts.Synth(model, f"Hello, I'm {name.title()}. This is how I sound on the laptop, "
+                           "when I'm on my own brain or reading something private.")
+    sd.play(np.frombuffer(pcm, dtype=np.int16), samplerate=rate,
+            device=AudioDevices.resolve(GetOutputDevice(), "output"))
+    sd.wait()
+
+
 class VoicePage(QWidget):
     """Microphone, speakers, volume and the assistant's voice. Everything saves
     as soon as it is changed; the window owner reconnects the session."""
@@ -3365,6 +3455,79 @@ class VoicePage(QWidget):
             c.addWidget(_Hint("Changing the voice starts a fresh conversation."))
         lay.addWidget(card)
 
+        # The laptop's own voice (Piper)
+        from Brain.Settings import GetLocalVoice
+        from System import LocalBrain
+        card, c = _Card()
+        c.addWidget(_Caption("Laptop voice"))
+        c.addWidget(_Hint("Orion's voice on this laptop (Piper): used On-device, and to read private "
+                          "things in private mode. It never leaves the laptop."))
+        self._lv = _Dropdown()
+        self.FillLocalVoices()
+        picked = GetLocalVoice()
+        i = self._lv.findData(picked) if picked else 0
+        self._lv.setCurrentIndex(i if i >= 0 else 0)
+        self._lv.currentIndexChanged.connect(lambda _i: self.PickLocalVoice())
+        c.addWidget(self._lv)
+        row = QHBoxLayout()
+        self._lv_try = _GhostButton("▶  Try it")
+        self._lv_try.clicked.connect(self.TryLocalVoice)
+        row.addWidget(self._lv_try)
+        self._lv_note = _Text("", 9, C.TEXT_DIM, wrap=True)
+        row.addWidget(self._lv_note, 1)
+        c.addLayout(row)
+        c.addWidget(_Hint("A voice is downloaded once (about 60 MB, 110 MB for best quality) the first "
+                          "time you try or use it."))
+        _Relay().voice_try.connect(self.OnVoiceTry)
+        lay.addWidget(card)
+
+    # the laptop's voice
+    def FillLocalVoices(self) -> None:
+        from Brain.Settings import GetVoice
+        from System import LocalBrain
+        names = {v: (n, note) for v, n, note in LocalBrain.LOCAL_VOICES}
+        gem = GetVoice()
+        like = LocalBrain.LIKE_GEMINI.get(gem, LocalBrain.VOICE)
+        self._lv.blockSignals(True)
+        self._lv.clear()
+        self._lv.addItem(f"Like {gem} — {names.get(like, (like, ''))[0]}  (automatic)", "")
+        for v, n, note in LocalBrain.LOCAL_VOICES:
+            self._lv.addItem(f"{n} — {note}", v)
+        self._lv.blockSignals(False)
+
+    def PickLocalVoice(self) -> None:
+        from Brain.Settings import GetLocalVoice, SaveLocalVoice
+        v = self._lv.currentData() or ""
+        if v != GetLocalVoice():
+            SaveLocalVoice(v)
+            self._lv_note.setText("Saved. Used from the next thing it says on the laptop.")
+
+    def TryLocalVoice(self) -> None:
+        from Brain.Settings import GetVoice
+        from System import LocalBrain
+        voice = self._lv.currentData() or LocalBrain.LIKE_GEMINI.get(GetVoice(), LocalBrain.VOICE)
+        self._lv_try.setEnabled(False)
+        self._lv_note.setText("Getting the voice ready…")
+        relay = _Relay()
+
+        def Work():
+            try:
+                PlayLocalVoice(voice, lambda t: relay.voice_try.emit(t, C.TEXT_DIM))
+                relay.voice_try.emit("Played. Pick it in the list to keep it.", C.GREEN)
+            except Exception as e:
+                relay.voice_try.emit(f"Couldn't play it: {str(e)[:120]}", C.RED)
+
+        threading.Thread(target=Work, daemon=True, name="voice-try").start()
+
+    def OnVoiceTry(self, text: str, colour: str) -> None:
+        try:
+            self._lv_note.setText(text)
+            self._lv_note.setStyleSheet(f"color: {colour}; background: transparent; border: none;")
+            if colour != C.TEXT_DIM:
+                self._lv_try.setEnabled(True)
+        except RuntimeError:
+            pass                            # the page was closed meanwhile
+
     # devices
     def SaveDevices(self) -> None:
         from Brain.Settings import GetInputDevice, GetOutputDevice, SaveInputDevice, SaveOutputDevice
@@ -3468,6 +3631,11 @@ class VoicePage(QWidget):
         if voice != GetVoice():
             SaveVoice(voice)
             self.voice_changed.emit()
+            keep = self._lv.currentIndex()
+            self.FillLocalVoices()              # "Like <voice>" follows the new Gemini voice
+            self._lv.blockSignals(True)
+            self._lv.setCurrentIndex(keep)
+            self._lv.blockSignals(False)
 
     def RefreshVoices(self) -> None:
         for v, card in self._voice_cards.items():
@@ -3592,6 +3760,21 @@ class LookPage(QWidget):
         c.addWidget(_Hint(Accents.HINT))
         lay.addWidget(card)
         self.RefreshSwatches()
+
+        from Interface import FloatingReactor as FR
+        card, c = _Card()
+        c.addWidget(_Caption("Floating reactor"))
+        start = ToggleSwitch(bool(FR.Load().get("start_floating")))
+        start.toggled.connect(lambda v: FR.Save(start_floating=bool(v)))
+        c.addWidget(_SettingRow(
+            "Start as the floating reactor",
+            "Orion opens as its reactor on the desktop instead of this window. Drag it anywhere; click to "
+            "type, double-click for this window, right-click for the mic, size and Quit. Closing this "
+            "window puts the reactor back.", start))
+        show = _GhostButton("Show the floating reactor now")
+        show.clicked.connect(lambda: self._window.ShowFloating())
+        c.addWidget(show)
+        lay.addWidget(card)
 
     def SaveNames(self) -> None:
         name = self._name.text().strip() or "ORION"
@@ -3761,7 +3944,8 @@ class MemoryPage(QWidget):
         col.addWidget(_Text(r["value"], 9, C.TEXT_MED, wrap=True))
         group = dict(_MEMORY_GROUPS).get(r["category"], r["category"].capitalize())
         when = _FriendlyDay(r.get("updated", ""))
-        col.addWidget(_Text(group + (f"  ·  {when}" if when else ""), 8, C.TEXT_DIM))
+        where = "  ·  from JARVIS" if r.get("source") == "jarvis" else ""
+        col.addWidget(_Text(group + (f"  ·  {when}" if when else "") + where, 8, C.TEXT_DIM))
         h.addLayout(col, 1)
         rm = QPushButton("Forget")
         rm.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -3853,6 +4037,8 @@ class PluginsPage(QWidget):
         self._widgets: dict[tuple, object] = {}
         self._types: dict[tuple, str] = {}
         self._status: dict[str, QLabel] = {}
+        self._unsaved: set[tuple] = set()    # fields with "save": False (a one-time code)
+        self._live: list[tuple] = []         # (widget, get) for status lines and button labels
         _Relay().plugin_test.connect(self.OnTestDone)
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
@@ -3885,6 +4071,35 @@ class PluginsPage(QWidget):
 
         for sec in self._sections:
             lay.addWidget(self.Section(sec))
+        if self._live:
+            self._live_tmr = QTimer(self)
+            self._live_tmr.timeout.connect(self.RefreshLive)
+            self._live_tmr.start(1500)
+
+    @staticmethod
+    def _Call(get):
+        """A plugin's live text: a string, or (text, ok) to colour it. Never raises."""
+        try:
+            res = get()
+        except Exception as e:
+            return f"({e.__class__.__name__})", None
+        if isinstance(res, tuple) and len(res) == 2:
+            return str(res[0]), res[1]
+        return str(res or ""), None
+
+    def RefreshLive(self) -> None:
+        for w, get, kind in self._live:
+            try:
+                text, ok = self._Call(get)
+                if kind == "button":
+                    if w.text() != text:
+                        w.setText(text)
+                elif w.text() != text:
+                    w.setText(text)
+                    colour = C.TEXT if ok is None else C.GREEN if ok else C.TEXT_DIM
+                    w.setStyleSheet(f"color: {colour}; background: transparent; border: none;")
+            except RuntimeError:              # the page was closed
+                pass
 
     def SetEnabled(self, name: str, on: bool) -> None:
         from Brain.Settings import GetPluginEnabled, SavePluginEnabled
@@ -3904,6 +4119,19 @@ class PluginsPage(QWidget):
             ftype = (field.get("type") or "text").lower()
             label = field.get("label") or key
             stored = values.get(key, field.get("default"))
+            if ftype == "status":
+                # Read-only, kept up to date by the plugin's own get(): "Connected to JARVIS Link".
+                if not callable(field.get("get")):
+                    continue
+                text, ok = self._Call(field["get"])
+                w = _Text(text, 9, C.TEXT if ok is None else C.GREEN if ok else C.TEXT_DIM, wrap=True)
+                row = QHBoxLayout()
+                row.setSpacing(10)
+                row.addWidget(_FieldLabel(label))
+                row.addWidget(w, 1)
+                c.addLayout(row)
+                self._live.append((w, field["get"], "status"))
+                continue
             if ftype == "toggle":
                 w = ToggleSwitch(bool(stored))
                 c.addWidget(_SettingRow(label, field.get("hint") or "", w))
@@ -3921,6 +4149,10 @@ class PluginsPage(QWidget):
                 c.addWidget(w)
             self._widgets[(ns, key)] = w
             self._types[(ns, key)] = ftype
+            if field.get("save") is False:
+                self._unsaved.add((ns, key))
+            if field.get("hint") and ftype != "toggle":
+                c.addWidget(_Hint(str(field["hint"])))
 
         row = QHBoxLayout()
         row.setSpacing(8)
@@ -3929,9 +4161,14 @@ class PluginsPage(QWidget):
         row.addWidget(status, 1)
         action = sec.get("action")
         if isinstance(action, dict) and callable(action.get("run")):
-            test = _GhostButton(str(action.get("label") or "Test").capitalize())
+            label = action.get("label")
+            # A callable label follows the plugin's state: Connect / Disconnect.
+            first = self._Call(label)[0] if callable(label) else str(label or "Test").capitalize()
+            test = _GhostButton(first)
             test.clicked.connect(lambda _=False, n=ns: self.RunAction(n))
             row.addWidget(test)
+            if callable(label):
+                self._live.append((test, label, "button"))
         save = _PrimaryButton("Save")
         save.clicked.connect(lambda _=False, n=ns: self.SaveNs(n, say=True))
         row.addWidget(save)
@@ -3960,7 +4197,7 @@ class PluginsPage(QWidget):
 
     def SaveNs(self, ns: str, say: bool = False) -> None:
         from Brain.Settings import SavePluginConfig
-        SavePluginConfig(ns, self.Gather(ns))
+        SavePluginConfig(ns, {k: v for k, v in self.Gather(ns).items() if (ns, k) not in self._unsaved})
         if say:
             self.Say(ns, "Saved.", C.GREEN)
 
@@ -3972,7 +4209,7 @@ class PluginsPage(QWidget):
             return
         self.SaveNs(ns)                      # test what was typed, not what was saved before
         values = self.Gather(ns)
-        self.Say(ns, "Testing…", C.TEXT_DIM)
+        self.Say(ns, str((sec.get("action") or {}).get("busy") or "Testing…"), C.TEXT_DIM)
         relay = _Relay()
 
         def Worker():
@@ -3991,6 +4228,10 @@ class PluginsPage(QWidget):
     def OnTestDone(self, ns: str, ok: bool, msg: str) -> None:
         try:
             self.Say(ns, msg, C.GREEN if ok else C.RED)
+            for (n, key) in self._unsaved:    # a one-time code is cleared once used
+                if n == ns and ok and isinstance(self._widgets.get((n, key)), QLineEdit):
+                    self._widgets[(n, key)].clear()
+            self.RefreshLive()
         except RuntimeError:
             pass
 
@@ -4229,6 +4470,8 @@ class MainWindow(QMainWindow):
     _mic_hold_sig    = pyqtSignal(bool)        # hold-to-speak: muted, with no log line
     _clipboard_sig  = pyqtSignal(str)        # clipboard text changed (thread-safe)
     _confirm_sig    = pyqtSignal(str, str)   # (title, detail) — irreversible-action gate
+    _settings_sig   = pyqtSignal(str)        # open Settings at a section, from any thread
+    _remote_sig     = pyqtSignal()           # open the phone remote, from any thread
     _confirm_hide_sig = pyqtSignal()
     _quiz_sig       = pyqtSignal(str, object, object)  # (topic, questions, grader)
     _quiz_hide_sig  = pyqtSignal()
@@ -4277,6 +4520,8 @@ class MainWindow(QMainWindow):
         self.ptt_hold          = None   # callable: (held: bool) -> None — windowed chord
         self._muted            = False
         self._current_file: str | None = None
+        self._floating         = None   # the floating reactor, when Orion has one (OrionUI)
+        self._quitting         = False
 
         central = QWidget()
         central.setStyleSheet(f"background: {C.BG};")
@@ -4499,6 +4744,8 @@ class MainWindow(QMainWindow):
         self._reconfig_sig.connect(self.ShowSetup)
         self._camera_sig.connect(self._ShowCameraFrame)
         self._confirm_sig.connect(self.ShowConfirmBanner)
+        self._settings_sig.connect(self.OpenSettings)
+        self._remote_sig.connect(self.OpenPhoneRemote)
         self._confirm_hide_sig.connect(self.HideConfirmBanner)
         self._cam_stream_sig.connect(self.OnCamStream)
         self._cam_frame_sig.connect(self.OnCamFrame)
@@ -4511,6 +4758,11 @@ class MainWindow(QMainWindow):
         self._quiz_sig.connect(self._ShowQuiz)
         self._quiz_hide_sig.connect(self._HideQuiz)
         self._review_sig.connect(self._ShowReview)
+        # Things only the window can show bring it up from the floating reactor.
+        for sig in (self._content_sig, self._reconfig_sig, self._confirm_sig, self._settings_sig,
+                    self._quiz_sig, self._review_sig, self._video_open_sig):
+            sig.connect(self.NeedWindow)
+        self._cam_stream_sig.connect(lambda on: on and self.NeedWindow())
         self._cam_stop = threading.Event()
 
         # The conversation drawer starts open (placed on first show).
@@ -5227,6 +5479,35 @@ class MainWindow(QMainWindow):
         lay.addWidget(gauges)
         lay.addSpacing(22)
 
+        # JARVIS Link (phone): a small dot, shown only once Orion has been paired with Link.
+        self._link_dot = _ClickArea()
+        self._link_dot.setFixedSize(22, 22)
+        self._link_dot.clicked.connect(lambda: self.OpenSettings("plugins"))
+        dl = QHBoxLayout(self._link_dot)
+        dl.setContentsMargins(0, 0, 0, 0)
+        self._link_dot_lbl = QLabel("●")
+        self._link_dot_lbl.setFont(QFont(UI_FONT, 9))
+        self._link_dot_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        dl.addWidget(self._link_dot_lbl)
+        self._link_dot.hide()
+        self._link_dot_state = "unset"
+        # "ON-DEVICE" while the laptop's own brain is answering (System/LocalBrain.py).
+        self._device_badge = QLabel("ON-DEVICE")
+        bf = QFont(UI_FONT, 7, QFont.Weight.DemiBold)
+        bf.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, 1)
+        self._device_badge.setFont(bf)
+        self._device_badge.setToolTip("The laptop's own brain is answering: nothing goes to Gemini.")
+        self._device_badge.hide()
+        self._device_badge_on = False
+        lay.addWidget(self._device_badge)
+        lay.addSpacing(8)
+        # The phone's battery (D5), only while the phone has said lately.
+        self._ring_phone = RingGauge("PHN", 30)
+        self._ring_phone.hide()
+        lay.addWidget(self._ring_phone)
+        lay.addWidget(self._link_dot)
+        lay.addSpacing(10)
+
         clock_col = QVBoxLayout()
         clock_col.setSpacing(0)
         self._clock_lbl = QLabel("00:00")
@@ -5254,6 +5535,54 @@ class MainWindow(QMainWindow):
     def TickClock(self):
         self._clock_lbl.setText(time.strftime("%H:%M"))
         self._date_lbl.setText(time.strftime("%a %d %b %Y"))
+        self.TickLinkDot()
+        self.TickDeviceBadge()
+
+    def TickDeviceBadge(self) -> None:
+        badge = getattr(self, "_device_badge", None)
+        if badge is None:
+            return
+        try:
+            from System import LocalBrain
+            on = bool(LocalBrain.ACTIVE)
+        except Exception:
+            on = False
+        if on == self._device_badge_on:
+            return
+        self._device_badge_on = on
+        # Colours read now, so a theme or accent change since startup is used.
+        badge.setStyleSheet(f"color: {C.GREEN}; background: transparent; border: 1px solid {C.GREEN_D};"
+                            f" border-radius: 9px; padding: 2px 8px;")
+        badge.setVisible(on)
+
+    def TickLinkDot(self) -> None:
+        dot = getattr(self, "_link_dot", None)
+        if dot is None:
+            return
+        try:
+            from System.PhoneBridge import BRIDGE
+            state = BRIDGE.Dot()
+        except Exception:
+            state = None
+        try:
+            together = BRIDGE.together
+            ring = together.PhoneRing() if together is not None else None
+        except Exception:
+            ring = None
+        if ring is None:
+            self._ring_phone.hide()
+        else:
+            self._ring_phone.SetValue(ring[0], ring[1])
+            self._ring_phone.setToolTip(ring[2])
+            self._ring_phone.show()
+        if state == self._link_dot_state:
+            return
+        self._link_dot_state = state
+        dot.setVisible(state is not None)
+        colour = C.GREEN if state else C.TEXT_DIM
+        self._link_dot_lbl.setStyleSheet(f"color: {colour}; background: transparent;")
+        dot.setToolTip("JARVIS Link (phone): connected" if state else
+                       "JARVIS Link (phone): not connected — click for settings")
 
     def BuildRightPanel(self) -> QWidget:
         """The full conversation and the file drop, in a drawer that slides in
@@ -6200,6 +6529,18 @@ class MainWindow(QMainWindow):
 
     # ── Settings window ──────────────────────────────────────────────────────
 
+    def OpenPhoneRemote(self) -> None:
+        old = getattr(self, "_phone_remote", None)
+        try:
+            if old is not None and old.isVisible():
+                old.raise_()
+                old.activateWindow()
+                return
+        except RuntimeError:
+            pass
+        self._phone_remote = PhoneRemote(parent=self)
+        self._phone_remote.show()
+
     def OpenSettings(self, section: str = "") -> None:
         old = getattr(self, "_settings_overlay", None)
         if old is not None and old.isVisible():
@@ -6210,6 +6551,7 @@ class MainWindow(QMainWindow):
         sections = [
             ("general", "◎", "General", self.BuildGeneralPage),
             ("brain", "✦", "Brain", self.BuildBrainPage),
+            ("privacy", "◈", "Privacy", self.BuildPrivacyPage),
             ("voice", "♪", "Voice & audio", self.BuildVoicePage),
             ("look", "◐", "Look & name", lambda p: LookPage(self, p)),
             ("memory", "◉", "Memory", lambda p: MemoryPage(self._assistant_name, p)),
@@ -6375,6 +6717,20 @@ class MainWindow(QMainWindow):
                                 "done at once on this computer. Typed ones never reach the model.", fast))
         lay.addWidget(card)
 
+        from Brain.Settings import (GetClipboardHelpEnabled, SaveClipboardHelpEnabled,
+                                    GetCrashAlertsEnabled, SaveCrashAlertsEnabled)
+        card, c = _Card()
+        c.addWidget(_Caption("Watching"))
+        clip = ToggleSwitch(GetClipboardHelpEnabled())
+        clip.toggled.connect(SaveClipboardHelpEnabled)
+        c.addWidget(_SettingRow("Clipboard help", "Copy an error, a YouTube link or a GitHub repo and Orion "
+                                "offers to help. What you copy is only read if you say yes.", clip))
+        crash = ToggleSwitch(GetCrashAlertsEnabled())
+        crash.toggled.connect(SaveCrashAlertsEnabled)
+        c.addWidget(_SettingRow("Crash alerts", "When part of Orion crashes, it says so and offers a repair. "
+                                "Nothing changes unless you say yes.", crash))
+        lay.addWidget(card)
+
         card, c = _Card()
         c.addWidget(_Caption("Window"))
         fs = ToggleSwitch(self.isFullScreen())
@@ -6396,6 +6752,75 @@ class MainWindow(QMainWindow):
         sc.clicked.connect(self.CreateDesktopShortcut)
         c.addWidget(_SettingRow("Desktop shortcut", "An icon on your desktop to open it.", sc))
         lay.addWidget(card)
+        return page
+
+    def BuildPrivacyPage(self, parent):
+        """Private mode, like the phone's (Brain/Privacy.py). Linked with JARVIS, both follow the newest change."""
+        from Brain import Privacy
+        from System import LocalBrain
+        page = QWidget(parent)
+        page.setStyleSheet("background: transparent;")
+        lay = QVBoxLayout(page)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(14)
+        cur = Privacy.Get()
+
+        def Changed(**kw):
+            Privacy.Save(**kw)
+            try:
+                from System.PhoneBridge import BRIDGE
+                if BRIDGE.together is not None:
+                    BRIDGE.together.OfferPrivacy()        # the phone follows (P3)
+            except Exception as e:
+                print(f"[Privacy] phone not told: {e}")
+            self.QueueReconnect("private mode")            # Gemini's instructions are rebuilt without them
+
+        card, c = _Card()
+        c.addWidget(_Caption("Private mode"))
+        on = ToggleSwitch(cur["on"])
+        on.toggled.connect(lambda v: Changed(on=v))
+        c.addWidget(_SettingRow(
+            "Keep private things from Gemini",
+            "While Gemini is the brain, the things below never reach it: Orion reads them out in its own voice "
+            "on the laptop, and Gemini only hears that it was read privately. Linked with JARVIS, the phone "
+            "follows this switch too.", on))
+        if LocalBrain.Mode() == "local":
+            c.addWidget(_Hint("You're On-device (⚙ › Brain), so nothing goes to Gemini at all."))
+        lay.addWidget(card)
+
+        card, c = _Card()
+        c.addWidget(_Caption("Never sent to Gemini"))
+        for line in ("Messages the call secretary took, and the recording itself",
+                     "Your phone's notifications, screens and where it is",
+                     "The shared activity log of Orion and JARVIS",
+                     "The kinds of memory ticked below"):
+            c.addWidget(_Hint("•  " + line))
+        lay.addWidget(card)
+
+        card, c = _Card()
+        c.addWidget(_Caption("Kept on the laptop"))
+        kinds = set(cur["kinds"])
+
+        def Kind(key, v):
+            now = set(Privacy.Get()["kinds"])
+            now = (now | {key}) if v else (now - {key})
+            Changed(kinds=sorted(now))
+
+        for key, label, detail in Privacy.KINDS:
+            t = ToggleSwitch(key in kinds)
+            t.toggled.connect(lambda v, k=key: Kind(k, v))
+            c.addWidget(_SettingRow(label, detail, t))
+        c.addWidget(_Hint("Your name, job, language and nationality always go: they're how Orion knows "
+                          "who it's talking to."))
+        lay.addWidget(card)
+
+        card, c = _Card()
+        c.addWidget(_Caption("Still sent to Gemini"))
+        c.addWidget(_Hint("Everything you say, the screen or camera when you ask, files you give it, web "
+                          "results, and what Orion does on the computer. Pick On-device in ⚙ › Brain to keep "
+                          "all of it on the laptop."))
+        lay.addWidget(card)
+        lay.addStretch(1)
         return page
 
     def BuildBrainPage(self, parent):
@@ -6550,6 +6975,48 @@ class MainWindow(QMainWindow):
         if self.on_interrupt:
             self.on_interrupt()
 
+    # ── The floating reactor (Interface/FloatingReactor.py) ─────────────────
+    # One look at a time: showing one hides the other.
+    def AttachFloating(self, floating) -> None:
+        self._floating = floating
+
+    def ShowWindow(self) -> None:
+        if self._floating is not None:
+            self._floating.hide()
+        if self.isMinimized():
+            self.showNormal()
+        self.show()
+        self.raise_()
+        self.activateWindow()
+
+    def ShowFloating(self) -> None:
+        if self._floating is None:
+            self.showMinimized()
+            return
+        self.hide()
+        self._floating.show()
+
+    def NeedWindow(self, *_):
+        """Something only the window shows (a confirm, a quiz, settings…):
+        bring it up if Orion is floating."""
+        if self._floating is not None and not self.isVisible():
+            self.ShowWindow()
+
+    def QuitOrion(self) -> None:
+        self._quitting = True
+        if self._floating is not None:
+            self._floating.hide()
+        QApplication.instance().quit()
+
+    def closeEvent(self, e):
+        # With the floating reactor, closing the window only puts Orion back
+        # on the desktop; Quit lives in its menu and the tray's.
+        if self._floating is not None and not self._quitting:
+            e.ignore()
+            self.ShowFloating()
+            return
+        super().closeEvent(e)
+
     def ToggleMute(self):
         # A deliberate press settles the question: whatever the video did, or is
         # about to do, the user has now said what they want.
@@ -6655,6 +7122,127 @@ class _RootShim:
         pass
 
 
+# ── The phone remote (C9): the phone's screen as its numbered list ──────────
+
+class PhoneRemote(QWidget):
+    """The phone's screen as the same numbered text list screen control reads (no video). Click an item to tap
+    it; scroll, back, home and type below. No model: you are the one driving, so it costs no tokens. The phone
+    keeps its own rules (blocked apps, risky taps ask). Closes after 2 minutes of nothing."""
+
+    got = pyqtSignal(dict)
+    IDLE_MS = 120_000
+
+    def __init__(self, ask=None, parent=None):
+        super().__init__(parent, Qt.WindowType.Window)
+        from System import PhoneBridge
+        self._ask = ask or PhoneBridge.AskPhone
+        self.setWindowTitle("Phone remote")
+        self.setMinimumSize(380, 520)
+        self.setStyleSheet(f"background: {C.BG}; color: {C.TEXT};")
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(16, 14, 16, 14)
+        lay.setSpacing(10)
+        self._note = _Text("Reading the phone's screen…", 9, C.TEXT_DIM, wrap=True)
+        lay.addWidget(self._note)
+        self._scroll = QScrollArea()
+        self._scroll.setWidgetResizable(True)
+        self._scroll.setStyleSheet(f"QScrollArea {{ border: 1px solid {C.BORDER}; border-radius: 10px; background: {C.PANEL}; }}")
+        self._items = QWidget()
+        self._items.setStyleSheet(f"background: {C.PANEL};")
+        self._items_lay = QVBoxLayout(self._items)
+        self._items_lay.setContentsMargins(8, 8, 8, 8)
+        self._items_lay.setSpacing(2)
+        self._items_lay.addStretch()
+        self._scroll.setWidget(self._items)
+        lay.addWidget(self._scroll, 1)
+        row = QHBoxLayout()
+        for label, action in (("▲", "scroll_up"), ("▼", "scroll_down"), ("Back", "back"), ("Home", "home"), ("↻", "")):
+            b = _GhostButton(label)
+            b.clicked.connect(lambda _=False, a=action: self.Step(a) if a else self.Read())
+            row.addWidget(b)
+        lay.addLayout(row)
+        typing = QHBoxLayout()
+        self._type = _Input("", "Type into the selected box…")
+        send = _GhostButton("Type")
+        send.clicked.connect(lambda: self.Step("type", text=self._type.text()))
+        typing.addWidget(self._type, 1)
+        typing.addWidget(send)
+        lay.addLayout(typing)
+        self._busy = False
+        self.got.connect(self.Show)
+        self._idle = QTimer(self)
+        self._idle.setSingleShot(True)
+        self._idle.timeout.connect(self.close)
+        self._idle.start(self.IDLE_MS)
+        self.Read()
+
+    def _Go(self, action: str, args: dict) -> None:
+        if self._busy:
+            return
+        self._busy = True
+        self._idle.start(self.IDLE_MS)
+        self._note.setText("Waiting for the phone…")
+
+        def Work():
+            try:
+                r = self._ask(action, args, 15)
+            except Exception as e:
+                r = {"state": "failed", "text": str(e), "data": {}}
+            self.got.emit(r)
+        threading.Thread(target=Work, daemon=True).start()
+
+    def Read(self) -> None:
+        self._Go("screen_read", {})
+
+    def Step(self, action: str, item: int = 0, text: str = "") -> None:
+        self._Go("screen_step", {"action": action, "item": item, "text": text})
+
+    @staticmethod
+    def Lines(listing: str) -> list[tuple[int, str]]:
+        """'[12] button "Send"' (the phone's screen_control list) or '12. Send' → (12, 'button "Send"'); other
+        lines (like 'App on screen: …') get 0 and can't be clicked."""
+        import re
+        out = []
+        for line in str(listing or "").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            m = re.match(r"^\[(\d+)\]\s*(.+)$", line) or re.match(r"^(\d+)\.\s+(.+)$", line)
+            out.append((int(m.group(1)), m.group(2)) if m else (0, line))
+        return out
+
+    def Show(self, r: dict) -> None:
+        self._busy = False
+        try:
+            listing = (r.get("data") or {}).get("list") or ""
+            if r.get("state") == "failed" or not listing:
+                self._note.setText(str(r.get("text") or "The phone didn't send its screen."))
+                if not listing:
+                    return
+            else:
+                self._note.setText("Click an item to tap it on the phone.")
+            while self._items_lay.count() > 1:
+                w = self._items_lay.takeAt(0).widget()
+                if w is not None:
+                    w.deleteLater()
+            for n, label in self.Lines(listing):
+                if n:
+                    b = QPushButton(f"{n}.  {label}")
+                    b.setCursor(Qt.CursorShape.PointingHandCursor)
+                    b.setFont(QFont(UI_FONT, 9))
+                    b.setStyleSheet(f"""
+                        QPushButton {{ text-align: left; padding: 5px 8px; border: none; border-radius: 6px;
+                                       background: transparent; color: {C.TEXT}; }}
+                        QPushButton:hover {{ background: {C.PRI_GHO}; color: {C.WHITE}; }}""")
+                    b.clicked.connect(lambda _=False, i=n: self.Step("tap", item=i))
+                    w = b
+                else:
+                    w = _Text(label, 8, C.TEXT_DIM, wrap=True)
+                self._items_lay.insertWidget(self._items_lay.count() - 1, w)
+        except RuntimeError:
+            pass                       # closed meanwhile
+
+
 class OrionUI:
     def __init__(self, size=None):
         if sys.platform == "win32":
@@ -6669,9 +7257,38 @@ class OrionUI:
         ico = Path(__file__).resolve().parent.parent / "Config" / "Orion.ico"
         if ico.exists():
             self._app.setWindowIcon(QIcon(str(ico)))
-        self._win = MainWindow()
         self.root = _RootShim(self._app)
-        self._win.show()
+        self._float = None
+        self._tray = None
+        # One Orion: a second launch only asks the running one to show itself.
+        from Interface import FloatingReactor as FR
+        try:
+            self._server = FR.ClaimSingleInstance()
+        except Exception as e:
+            print(f"[Floating] single-copy guard off: {e}")
+            self._server = object()
+        self.duplicate = self._server is None
+        if self.duplicate:
+            print("Orion is already running; asked it to show itself.")
+            return
+        self._win = MainWindow()
+        try:
+            self._float = FR.FloatingReactor(self._win)
+            self._win.AttachFloating(self._float)
+            self._tray = FR.MakeTray(self._win, self._float)
+            if hasattr(self._server, "newConnection"):
+                FR.ServeSummons(self._server, self._float.Summon)
+            # Hiding the window to the reactor must not count as "last window closed".
+            self._app.setQuitOnLastWindowClosed(False)
+        except Exception as e:
+            print(f"[Floating] the floating reactor is off: {e}")
+            self._float = None
+            self._win.AttachFloating(None)
+        # The setup screen (no API key yet) needs the window.
+        if self._float is not None and FR.Load().get("start_floating") and self._win._ready:
+            self._float.show()
+        else:
+            self._win.show()
 
     @property
     def muted(self) -> bool:
@@ -6726,6 +7343,14 @@ class OrionUI:
     def HideConfirm(self) -> None:
         """Thread-safe: take the gate down."""
         self._win._confirm_hide_sig.emit()
+
+    def OpenSettings(self, section: str = "") -> None:
+        """Thread-safe: open Settings at a section ("plugins"), e.g. from a plugin's run()."""
+        self._win._settings_sig.emit(str(section or ""))
+
+    def OpenPhoneRemote(self) -> None:
+        """Thread-safe: the phone's screen as a clickable list (Plugins/AskPhone.py, action remote)."""
+        self._win._remote_sig.emit()
 
     @property
     def get_plugins(self):
@@ -6886,5 +7511,4 @@ class OrionUI:
         self.SetState("SPEAKING")
 
     def StopSpeaking(self):
-        if not self.muted:
-            self.SetState("LISTENING")
+        self.SetState("MUTED" if self.muted else "LISTENING")

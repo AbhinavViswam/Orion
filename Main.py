@@ -1,3 +1,11 @@
+import os as _os
+
+# ── RAM: one thread for numpy's maths library ────────────────────────────────
+# OpenBLAS reserves a buffer per CPU thread the moment numpy is imported:
+# 363 MB on this 12-thread laptop, measured, for sums small enough that one
+# thread does them just as fast (10 MB). Must be set before numpy loads.
+_os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+
 import platform as _platform
 import subprocess as _subprocess
 
@@ -67,6 +75,11 @@ from Actions.Proactive import ProactiveEngine
 from Actions.BackgroundMonitor import AddMonitor, RemoveMonitor, ListMonitors, CheckAll as monitor_check_all
 from Actions.WebSearch import News as _fetch_news_sync
 from System import FastCommands, SelfRepair, SkillForge
+from System import AlertBus, PhoneBridge
+from System import CrashWatch
+from System import LocalBrain
+from Brain import Privacy
+from System.ClipboardWatch import ClipboardWatch
 from Brain.Settings import GetFastCommandsEnabled
 from Brain.Settings import GetBriefEnabled, GetMediaResolution, GetProactiveAudioEnabled, GetPushToTalkEnabled, GetThinkingEnabled, GetTurnTuning, GetVoice, GetInputDevice, GetOutputDevice
 from Brain import Gemini as _gemini
@@ -158,6 +171,10 @@ _FIRST_SOUND = CHUNK_SIZE / RECEIVE_SAMPLE_RATE      # ~43 ms
 # is re-anchored. The buffer is the hard limit on how much audio can be queued
 # ahead, so anything beyond it plus a margin for clock error is impossible.
 _CURSOR_SLACK = 0.15
+
+# Speech that no model turn ends (the private voice, announcements) counts as
+# over this long after its last sound has played.
+_QUIET_END = 1.2
 
 # Erring early is the safe direction: motion slightly before the sound reads
 # better than motion after it, so where this is uncertain it is biased to lead.
@@ -526,6 +543,11 @@ def KeepContextOf(exc: BaseException) -> bool:
     return True
 
 
+# Tools that can run for minutes: shown on the phone while they do (System/AlertBus.Work).
+_PHONE_TASKS = {"dev_agent": "the dev agent", "browser_control": "a browser task",
+                "flight_finder": "a flight search", "code_helper": "a coding task", "game_updater": "game updates"}
+
+
 class OrionLive:
     def __init__(self, ui: OrionUI):
         # Platform limits are announced once per run, not once per
@@ -560,6 +582,12 @@ class OrionLive:
         # Set only when a local pipeline is running, so push-to-talk can tell it
         # the turn is over. Live decides that on the server; nothing does here.
         self._engine               = None
+        # The laptop's own brain (System/LocalBrain.py). `_local_fallback`: Auto mode switched
+        # to it because Gemini failed; `_local_hello`: say so once the local session is up.
+        self._local_fallback       = False
+        self._local_hello          = False
+        self._back_wait            = 60.0    # seconds between "is Gemini back?" checks
+        self._back_at              = 0.0     # when Orion last switched back to Gemini
         # Deadline for "we sent a turn and the server has said nothing since".
         # None means nothing is outstanding. Armed by the send sites, cleared by
         # the first frame of ANY response, watched by _watch_stall().
@@ -608,6 +636,7 @@ class OrionLive:
         self._resume_handle: str | None = None
         self._turn_done_event: asyncio.Event | None = None
         self._briefing_sent    = False          # morning briefing fires once per process
+        self._together         = None           # System/Together.py, once the phone bridge is up
         self._sys_monitor      = SystemMonitor()  # persistent cooldown state
         self._proactive        = ProactiveEngine()
         self._last_user_speech = time.monotonic()  # updated on every user utterance
@@ -643,6 +672,18 @@ class OrionLive:
         self.ui.get_plugin_settings = self._plugin_registry.SettingsSchemas  # ⚙ settings tab
         self.ui.request_say = self.PluginSay   # plugins: mid-task speech channel
 
+        # JARVIS Link (phone): connects in the background if Orion has been paired; never blocks or fails startup.
+        try:
+            from System.PhoneTasks import PhoneTasks
+            from System.Together import Together
+            PhoneBridge.BRIDGE.tasks = PhoneTasks(self, PhoneBridge.Answer)
+            self._together = Together(self)
+            PhoneBridge.BRIDGE.together = self._together
+            self._together.Start()
+            PhoneBridge.BRIDGE.Start(lambda: {"muted": self.ui.muted, "speaking": self._is_speaking})
+        except Exception as e:
+            print(f"[PhoneBridge] not started: {e}")
+
         # Restore the saved push-to-talk preference. Doing it here rather than
         # in __init__ means the hotkey thread only exists once there is a
         # session to talk to.
@@ -651,6 +692,58 @@ class OrionLive:
                 self.SetPushToTalk(True)
             except Exception as e:
                 print(f"[ORION] ⚠ Push-to-talk unavailable: {e}")
+
+        # Background watchers (System/ClipboardWatch.py, System/CrashWatch.py).
+        # Their offers are said by the brain, like any other alert.
+        from Brain.Settings import GetClipboardHelpEnabled, GetCrashAlertsEnabled
+        self._clipboard = ClipboardWatch(
+            on_found=lambda kind, text, spoken, note: self.SayAside(spoken, note, "CLIPBOARD"),
+            enabled=GetClipboardHelpEnabled,
+        )
+        self._clipboard.Start()
+        CrashWatch.SetAnnouncer(
+            lambda spoken, note: self.SayAside(spoken, note, "CRASH") if GetCrashAlertsEnabled() else None)
+
+    def SayAside(self, spoken: str, note: str = "", tag: str = "NOTE") -> None:
+        """A watcher's offer, handed to the brain (Gemini Live or the local
+        engine) to say in its own words and the user's language.
+
+        `spoken` is what to get across; `note` is what the brain should do if
+        the user says yes. Waits up to 20 s for a quiet moment (nobody talking)
+        so it never cuts in; if none comes, the offer is dropped. Never blocks.
+        """
+        def Work():
+            deadline = time.monotonic() + 20
+            while time.monotonic() < deadline:
+                with self._speaking_lock:
+                    busy = self._is_speaking
+                if not busy and not self.TailActive() and time.monotonic() - self._last_user_speech >= 4:
+                    self.PluginSay(f"[{tag}] Tell the user this in one short sentence, in their language, "
+                                   f"and stop: {spoken} {note}".strip())
+                    return
+                time.sleep(0.5)
+            print(f"[{tag}] skipped, never quiet: {spoken}")
+
+        threading.Thread(target=Work, daemon=True, name=f"say-aside-{tag.lower()}").start()
+
+    def PhoneTurn(self) -> bool:
+        """True while "Hey JARVIS…" said at the desk is the phone's turn (System/Together.py, D1)."""
+        return self._together is not None and self._together.PhoneTurn()
+
+    def GiveBriefingNow(self) -> None:
+        """The phone handed today's briefing to Orion (you're at the laptop). Thread-safe."""
+        loop = self._loop
+        if self._briefing_sent or not self.session or loop is None:
+            return
+        self._briefing_sent = True
+        asyncio.run_coroutine_threadsafe(self.SendStartupBriefing(), loop)
+        if self._together is not None:
+            self._together.Briefed()
+
+    def ToolDecls(self) -> list:
+        """Every tool the voice session is offered (the phone's desk runner uses the same list)."""
+        return (list(TOOL_DECLARATIONS) + self._action_registry.GetToolDeclarations()
+                + self._plugin_registry.GetToolDeclarations())
 
     def OnSkillsChanged(self) -> None:
         """A forged skill was added or removed. Reconnect so the model's tool
@@ -777,7 +870,7 @@ class OrionLive:
         """Something typed in the box: a fast command runs here and now, with
         no model and no tokens; anything else goes to the conversation."""
         try:
-            reply = await self.RunFastCommand(text)
+            reply = await (self.LocalFast(text) if self.LocalSession() else self.RunFastCommand(text))
         except Exception as e:
             print(f"[ORION] fast command failed: {e}")
             reply = None
@@ -853,8 +946,10 @@ class OrionLive:
             self._out_level = 0.0
         if value:
             self.ui.SetState("SPEAKING")
-        elif not self.ui.muted:
-            self.ui.SetState("LISTENING")
+        else:
+            # Muted too (hold-to-speak rests muted): leaving it alone kept the
+            # status on SPEAKING after the reply ended.
+            self.ui.SetState("MUTED" if self.ui.muted else "LISTENING")
 
     def SetPushToTalk(self, enabled: bool) -> str:
         """Turn hold-to-talk on or off. Returns the scope actually achieved."""
@@ -982,7 +1077,13 @@ class OrionLive:
             _user_name = ""
 
         memory     = LoadMemory()
-        mem_str    = FormatMemoryForPrompt(memory)
+        # Private mode (Brain/Privacy.py): the private kinds never go into Gemini's instructions.
+        mem_str    = FormatMemoryForPrompt(Privacy.ForGemini(memory))
+        if Privacy.Active():
+            mem_str = (mem_str + "\n\n" if mem_str else "") + (
+                "[PRIVATE MODE] Some of what you know about the user is kept on the laptop, away from you. "
+                "When a tool says something was read to the user privately, you do not have it: never guess, "
+                "repeat or sum it up.\n")
         sys_prompt = LoadSystemPrompt()
 
         now      = datetime.now()
@@ -1053,7 +1154,16 @@ class OrionLive:
                 print(f"[ORION] {len(_blocked)} tool(s) withheld — "
                       f"this engine cannot serve them")
 
-        _names = {(d.get("name") if isinstance(d, dict) else getattr(d, "name", ""))
+        # The laptop's own brain: a short prompt and the small tool set (plan §5). Reading
+        # the prompt is the slow part on a small model, so it gets none of the above.
+        if self.LocalSession():
+            return types.LiveConnectConfig(
+                response_modalities=["AUDIO"],
+                system_instruction=LocalBrain.Prompt(self._asst_name, CREATOR, _user_name, memory),
+                tools=[{"function_declarations": StripMeta(LocalBrain.ShortTools(_all_decls))}],
+            )
+
+        _names ={(d.get("name") if isinstance(d, dict) else getattr(d, "name", ""))
                   for d in _all_decls}
         sys_prompt = RenderPrompt(sys_prompt, {
             "assistant_name": self._asst_name,
@@ -1179,10 +1289,89 @@ class OrionLive:
 
         return out
 
-    async def ExecuteTool(self, fc) -> types.FunctionResponse:
-        """Run one tool call, and count it for Settings › Usage."""
+    async def ExecuteTool(self, fc, privately=None) -> types.FunctionResponse:
+        """Run one tool call, and count it for Settings › Usage.
+
+        A private result (Brain/Privacy.py) is read out on the laptop and the model gets only a note;
+        `privately`, when given (the phone's desk runner), receives the private text instead."""
+        reply = await self.RunTool(fc)
+        split = Privacy.Split(str((reply.response or {}).get("result", "")))
+        if split is not None:
+            note, spoken = split
+            reply.response = dict(reply.response or {}, result=note)
+            if privately is not None:
+                privately(spoken)
+            else:
+                await self.SpeakPrivately(spoken)
+        return reply
+
+    async def SpeakPrivately(self, text: str) -> None:
+        """Read `text` out with Orion's own voice on the laptop (not Gemini's), through the same
+        speaker queue as everything else, so the reactor moves and a click stops it."""
+        text = Privacy.Spoken(text)
+        if not text:
+            return
+        self.ui.WriteLog("SYS: Read privately on the laptop.")
+        q = self.audio_in_queue
+        tts = await asyncio.to_thread(self.PrivateVoice)
+        if tts is None or q is None:
+            # No voice could be made: show it on screen instead (this log never reaches Gemini).
+            self.ui.WriteLog(f"SYS: (private) {text}")
+            return
+        try:
+            async for pcm in tts.Speak(text):
+                for i in range(0, len(pcm or b""), 4800):
+                    q.put_nowait(pcm[i:i + 4800])
+        except Exception as e:
+            print(f"[Privacy] private voice failed: {e}")
+            self.ui.WriteLog(f"SYS: (private) {text}")
+
+    def PrivateVoice(self):
+        """Piper with the laptop brain's voice once it's downloaded (fetched in the background the first
+        time), else this computer's own voice. Built once."""
+        cached = getattr(self, "_private_voice", None)
+        if cached is not None and getattr(cached, "voice", "") == LocalBrain.LocalVoice():
+            return cached                     # a voice picked in ⚙ › Voice since then is rebuilt
+        from Engines import Registry
+        voice = None
+        try:
+            from importlib.util import find_spec
+            if find_spec("piper") is not None:
+                from Engines import TtsPiper
+                cfg = LocalBrain.TtsConfig()
+                if cfg["voice"] in TtsPiper.installed():
+                    voice = Registry.build(LocalBrain.TTS_ID, cfg)
+                else:
+                    threading.Thread(target=lambda: TtsPiper.prepare(cfg), daemon=True).start()
+        except Exception as e:
+            print(f"[Privacy] Piper unavailable: {e}")
+        if voice is None:
+            try:
+                voice = Registry.build("system_tts", Registry.defaults("system_tts"))
+            except Exception as e:
+                print(f"[Privacy] no private voice: {e}")
+                return None
+        else:
+            self._private_voice = voice       # only Piper is kept; the system voice is a stand-in
+        return voice
+
+    async def RunTool(self, fc) -> types.FunctionResponse:
         started = time.monotonic()
-        reply = await self._ExecuteTool(fc)
+        # A long job (still going after 15 s) shows on the phone as "Orion is working on …", then "finished".
+        task = _PHONE_TASKS.get(fc.name)
+        if task:
+            self._phone_job_n = getattr(self, "_phone_job_n", 0) + 1
+            session = f"{fc.name}:{self._phone_job_n}"
+            told = threading.Timer(15.0, lambda: AlertBus.Work(session, task, "working"))
+            told.daemon = True
+            told.start()
+        try:
+            reply = await self._ExecuteTool(fc)
+        finally:
+            if task:
+                told.cancel()
+                if time.monotonic() - started >= 15.0:
+                    AlertBus.Work(session, task, "done")
         try:
             result = str((reply.response or {}).get("result", ""))
             ok = not Outcome.IsProblem(result) and not result.startswith(("Tool '", "Unknown tool"))
@@ -1228,6 +1417,13 @@ class OrionLive:
                 # hundred short strings, and a thread hop would cost more than
                 # the work itself.
                 result = SearchMemory(args.get("query", ""), limit=8)
+                if Privacy.Active():
+                    keep, hidden = Privacy.SplitMemory(result)
+                    if hidden:
+                        result = Privacy.Privately(result, spoken=hidden, note=(
+                            (keep + "\n" if keep.strip() else "")
+                            + "(Some matching facts are private; they were read to the user on the laptop, "
+                              "not to you.)"))
 
             elif name == "undo":
                 if str(args.get("action", "")).lower().strip() == "list":
@@ -1309,6 +1505,7 @@ class OrionLive:
                             pass
                     await asyncio.sleep(1.5)
                     import os as _os
+                    CrashWatch.MarkEnded()
                     _os._exit(0)
                 asyncio.create_task(_do_shutdown())
 
@@ -1608,8 +1805,8 @@ class OrionLive:
                         await self.CheckFastTurn(" ".join(in_buf))
 
                     if response.data:
-                        if self._interrupted:
-                            pass  # discard: interrupted
+                        if self._interrupted or self.PhoneTurn():
+                            pass  # discard: interrupted, or "Hey JARVIS…" at the desk (the phone answers that one)
                         else:
                             if self._turn_done_event and self._turn_done_event.is_set():
                                 self._turn_done_event.clear()
@@ -1659,9 +1856,15 @@ class OrionLive:
                                 self._last_out_logged = ""   # new exchange
                                 self.ui.WriteLog(f"You: {full_in}")
                                 self._session_log.append(f"User: {full_in}")
+                                if self._together is not None:
+                                    self._together.OnTurn(full_in)
                             in_buf = []
 
                             full_out = " ".join(out_buf).strip()
+                            if self.PhoneTurn() and full_out:
+                                # Kept as context, not said or logged as Orion's answer: JARVIS answered this one.
+                                self._session_log.append(f"({self._asst_name} let JARVIS answer)")
+                                full_out = ""
                             # Second line of defence: even if a repeat slips
                             # into a *fresh* buffer after a flush, never log the
                             # same answer (or a tail of it) twice in a row.
@@ -1767,6 +1970,12 @@ class OrionLive:
                     ):
                         self.SetSpeaking(False)
                         self._turn_done_event.clear()
+                    elif (self._is_speaking and self.audio_in_queue.empty()
+                          and time.time() > self._play_cursor + _QUIET_END):
+                        # Speech with no turn end behind it (the private voice,
+                        # the laptop brain's hello, announcements): played out
+                        # and quiet, so it is over.
+                        self.SetSpeaking(False)
                     continue
 
                 self.SetSpeaking(True)
@@ -2015,6 +2224,8 @@ class OrionLive:
         while True:
             await asyncio.sleep(10)
             alert = await asyncio.to_thread(self._sys_monitor.check)
+            if alert:
+                AlertBus.Alert("alert", "Laptop", AlertBus.Plain(alert), speak=False)
             if not alert or not self.session:
                 continue
             # Don't interrupt an active conversation
@@ -2048,6 +2259,7 @@ class OrionLive:
                         lang_e = memory.get("identity", {}).get("language", {})
                         lang   = (lang_e.get("value", "") if isinstance(lang_e, dict) else str(lang_e)).strip() or "English"
                         for alert in alerts:
+                            AlertBus.Alert("monitor", *AlertBus.MonitorText(alert))
                             msg = (
                                 f"{alert}\n\n"
                                 f"Inform the user about this development naturally in {lang}. "
@@ -2129,6 +2341,8 @@ class OrionLive:
         the same ones the engine gets a moment later, and a misconfiguration is
         reported while there is still a Gemini session to fall back to.
         """
+        if self.UsingLocal():
+            return self.LocalCaps()
         if self.EngineMode() != "pipeline":
             return None
         try:
@@ -2175,6 +2389,87 @@ class OrionLive:
             print(f"[ORION] Pipeline engine unavailable: {e}")
             return None
 
+    # ── The laptop's own brain (System/LocalBrain.py) ──────────────────────
+    def UsingLocal(self) -> bool:
+        """On-device mode, or Auto mode after Gemini failed. Never under My own setup."""
+        if LocalBrain.Mode() != "auto":
+            self._local_fallback = False       # Auto's switch doesn't carry over to a later Auto
+        return self.EngineMode() != "pipeline" and LocalBrain.UseLocal(self._local_fallback)
+
+    def LocalCaps(self) -> dict:
+        from Engines import Registry
+        llm = Registry.build(LocalBrain.LLM_ID, LocalBrain.LlmConfig())
+        caps = dict(getattr(llm, "caps", {}) or {})
+        caps.update({"audio_out": True, "local_brain": True})
+        return caps
+
+    def LocalSession(self) -> bool:
+        caps = getattr(self, "_engine_caps", None)
+        return bool(caps and caps.get("local_brain"))
+
+    def FallBackToLocal(self, why: str) -> bool:
+        """Auto mode: Gemini failed, so switch to the laptop's own brain. False when
+        that isn't possible (another mode, not downloaded, already on it)."""
+        if self._local_fallback or self.EngineMode() == "pipeline" or not LocalBrain.CanFallBack():
+            return False
+        self._local_fallback = True
+        self._local_hello = True
+        # Gemini failing again soon after coming back: check less often.
+        self._back_wait = min(self._back_wait * 2, 1800.0) if time.monotonic() - self._back_at < 600 else 60.0
+        self._conn_backoff = 0
+        print(f"[ORION] {why} — switching to the laptop's own brain.")
+        self.ui.WriteLog(f"SYS: {why} — switching to the laptop's own brain.")
+        return True
+
+    async def LocalFast(self, text: str) -> str | None:
+        """The local brain's first stops: fast commands, the plain phone asks, then the
+        "limited tool access" check."""
+        reply = await self.RunFastCommand(text)
+        if reply is not None:
+            return reply
+        phone = LocalBrain.PhoneRule(text)
+        if phone is not None:
+            self._fast_n += 1
+            fr = await self.ExecuteTool(types.FunctionCall(id=f"fast-{self._fast_n}", name="ask_phone", args=phone))
+            return LocalBrain.PhoneReply(phone["action"], str((fr.response or {}).get("result", "")))
+        return LocalBrain.LimitedReply(text)
+
+    async def LocalHello(self) -> None:
+        """After the warm-up: say once that the laptop's own brain is answering."""
+        engine = self._engine
+        if engine is None:
+            return
+        await engine.warmup()
+        self._local_hello = False
+        await engine.Announce(LocalBrain.ON_LOCAL)
+
+    async def WatchGeminiBack(self) -> None:
+        """Auto mode on the local brain: when Gemini answers again, switch back at a quiet moment."""
+        while self._local_fallback:
+            await asyncio.sleep(self._back_wait)
+            if not await asyncio.to_thread(self.GeminiReachable):
+                continue
+            while (self._is_speaking or self.TailActive()
+                   or time.monotonic() - self._last_user_speech < 20):
+                await asyncio.sleep(2)
+            self._local_fallback = False
+            self._back_at = time.monotonic()
+            self.ui.WriteLog("SYS: Gemini is back — switching to it.")
+            self.RequestReconnect(keep_context=False, reason="Gemini is back")
+            return
+
+    @staticmethod
+    def GeminiReachable() -> bool:
+        """A cheap check that the key works and Gemini answers (reads a model's details;
+        no tokens are spent)."""
+        try:
+            client = genai.Client(api_key=GetApiKey(), http_options={"timeout": 8000})
+            client.models.get(model=_gemini.LiveModel())
+            return True
+        except Exception as e:
+            print(f"[ORION] Gemini still unavailable: {str(e)[:120]}")
+            return False
+
     @asynccontextmanager
     async def OpenSession(self, live_model: str, config):
         """The conversation, from whichever engine is configured.
@@ -2199,7 +2494,11 @@ class OrionLive:
         from Engines import Registry
         from Engines.EnginePipeline import PipelineEngine
 
-        pipe = GetPipeline()
+        local = self.LocalSession()
+        pipe = ({"llm": LocalBrain.LLM_ID, "stt": LocalBrain.STT_ID, "tts": LocalBrain.TTS_ID}
+                if local else GetPipeline())
+        local_cfg = {LocalBrain.LLM_ID: LocalBrain.LlmConfig, LocalBrain.STT_ID: LocalBrain.SttConfig,
+                     LocalBrain.TTS_ID: LocalBrain.TtsConfig}
 
         def part(slot):
             pid = str(pipe.get(slot) or "").strip()
@@ -2208,8 +2507,9 @@ class OrionLive:
             # `log` so a provider can say what it is doing — downloading a
             # voice, loading a model — in the activity log rather than only on a
             # console the user may not be watching.
-            cfg = dict(GetProviderConfig(pid))
-            cfg["log"] = self.ui.WriteLog
+            cfg = dict(local_cfg[pid]() if local else GetProviderConfig(pid))
+            if not (local and slot == "llm"):      # the same object LocalCaps() built
+                cfg["log"] = self.ui.WriteLog
             return Registry.build(pid, cfg)
 
         engine = PipelineEngine(part("llm"), part("stt"), part("tts"),
@@ -2220,7 +2520,7 @@ class OrionLive:
         engine.auto_turn = not self._ptt_enabled
         # My own setup: what was heard is checked for a fast command before it
         # reaches the language model, so those cost nothing and answer at once.
-        engine.fast_path = self.RunFastCommand
+        engine.fast_path = self.LocalFast if local else self.RunFastCommand
         self._engine = engine
         try:
             yield engine
@@ -2230,6 +2530,7 @@ class OrionLive:
 
     async def run(self):
         self._loop = asyncio.get_event_loop()
+        CrashWatch.WatchLoop(self._loop)
         self._reconnect_event = asyncio.Event()
 
         # ── Wire the shared core services to the interface ───────────────────
@@ -2242,6 +2543,8 @@ class OrionLive:
             log  = self.ui.WriteLog,
         )
         SetTrimNotifier(self.ui.WriteLog)
+        Privacy.SetSpeaker(lambda text: asyncio.run_coroutine_threadsafe(self.SpeakPrivately(text), self._loop))
+        PhoneBridge.BRIDGE.WrapConfirm(confirm_gate)   # Orion's confirmations reach the phone when you're away
 
         # Tell the device picker the exact rates the streams open at, from the
         # constants that actually open them — so it can never list a device that
@@ -2270,7 +2573,32 @@ class OrionLive:
                 # declarations depend on what the engine can serve. On a default
                 # install this returns None in a few microseconds and nothing
                 # below behaves any differently.
+                # The laptop's own brain: get Ollama and the model ready first (off the
+                # loop: a cold start takes ~20 s), or free them while Gemini answers.
+                if self.UsingLocal():
+                    try:
+                        await asyncio.to_thread(LocalBrain.Prepare)
+                    except LocalBrain.NotReady as e:
+                        if self._local_fallback:
+                            self._local_fallback = False
+                            self.ui.WriteLog(f"SYS: {e} Staying on Gemini.")
+                        else:
+                            # On-device mode and it can't run: wait for a settings change.
+                            self.ui.WriteLog(f"SYS: {e}")
+                            self.ui.SetState("SLEEPING")
+                            self._reconnect_event.clear()
+                            try:
+                                await asyncio.wait_for(self._reconnect_event.wait(), 300)
+                            except TimeoutError:
+                                pass
+                            self._reconnect_event.clear()
+                            continue
+                elif LocalBrain.ACTIVE:
+                    LocalBrain.ACTIVE = False
+                    await asyncio.to_thread(LocalBrain.Release)
+
                 self._engine_caps = self.ResolveEngineCaps()
+                LocalBrain.ACTIVE = self.LocalSession()
                 config = self.BuildConfig()
 
                 # The conversation itself. `_open_session` gives back a Gemini
@@ -2356,12 +2684,18 @@ class OrionLive:
                     # seconds and every one after it 1.2 — and eight seconds of
                     # nothing is how a working assistant gets reported broken.
                     if self._engine is not None:
-                        tg.create_task(self._engine.warmup())
+                        tg.create_task(self.LocalHello() if self.LocalSession() and self._local_hello
+                                       else self._engine.warmup())
+                    if self.LocalSession() and self._local_fallback:
+                        tg.create_task(self.WatchGeminiBack())
 
                     # Morning briefing — fires once per process launch (if enabled).
-                    if not self._briefing_sent and GetBriefEnabled():
+                    if (not self._briefing_sent and GetBriefEnabled()
+                            and (self._together is None or self._together.ShouldBrief())):
                         self._briefing_sent = True
                         tg.create_task(self.SendStartupBriefing())
+                        if self._together is not None:
+                            self._together.Briefed()   # so the phone skips its own today
 
             except KeyboardInterrupt:
                 raise
@@ -2382,6 +2716,20 @@ class OrionLive:
                         # handle so the next connect really does start empty.
                         self._resume_handle = None
                     self._conn_backoff = 0
+                    continue
+
+                # The laptop's own brain stopped (Ollama closed, a bug...). None of the
+                # Gemini handling below applies. Auto mode tries Gemini again.
+                if self.LocalSession():
+                    print(f"[ORION] Local brain error ({type(e).__name__}): {e}")
+                    traceback.print_exc()
+                    self.ui.WriteLog(f"SYS: The laptop's own brain stopped ({str(e)[:100]}).")
+                    self._local_fallback = False
+                    for _tb in BugTracebacks(e):
+                        CrashWatch.Report(_tb, "the laptop's own brain")
+                    self.SetSpeaking(False)
+                    self.ui.SetState("SLEEPING")
+                    await asyncio.sleep(5)
                     continue
 
                 # A resumption handle the server will not accept — expired, or
@@ -2413,6 +2761,8 @@ class OrionLive:
                 # limit always arrives mid-conversation.
                 if _gemini.NoteLiveFailure(live_model, err_str):
                     nxt = _gemini.LiveModel()
+                    if nxt == live_model and self.FallBackToLocal("Every Gemini model is out of quota"):
+                        continue
                     self.ui.WriteLog(
                         f"SYS: Switching to {nxt.split('/')[-1]} — the previous "
                         f"model is out of quota."
@@ -2455,6 +2805,9 @@ class OrionLive:
 
                 # Invalid API key — stop hammering the API, prompt re-configuration
                 if "API key not valid" in err_str or "1007" in err_str:
+                    if self.FallBackToLocal("The Gemini key was refused"):
+                        self.ui.WriteLog("ERR: API key invalid — re-enter it in ⚙ to use Gemini again.")
+                        continue
                     self.ui.WriteLog("ERR: API key invalid — please re-enter your key.")
                     self.ui.SetState("SLEEPING")
                     self.ui.PromptReconfig()
@@ -2469,8 +2822,10 @@ class OrionLive:
                     "TimeoutError", "timed out", "getaddrinfo", "CancelledError",
                     "ConnectionRefusedError", "OSError", "Cannot connect",
                 ))
+                if is_net_err and self.FallBackToLocal("Gemini can't be reached"):
+                    continue
                 if is_net_err:
-                    _conn_backoff = min(getattr(self, "_conn_backoff", 3) * 2, 60)
+                    _conn_backoff =min(getattr(self, "_conn_backoff", 3) * 2, 60)
                     self._conn_backoff = _conn_backoff
                     self.ui.WriteLog(
                         f"NET: Connection failed — retrying in {_conn_backoff}s. "
@@ -2478,6 +2833,10 @@ class OrionLive:
                     )
                 else:
                     self._conn_backoff = 3
+                    # A plain bug (not the network, not the server) in Orion's
+                    # own code: keep it for self-repair and offer a fix.
+                    for _tb in BugTracebacks(e):
+                        CrashWatch.Report(_tb, "the voice session")
             finally:
                 self.session = None
                 # Only save if there was a real conversation (≥3 turns)
@@ -2492,8 +2851,34 @@ class OrionLive:
             print(f"[ORION] Reconnecting in {delay}s...")
             await asyncio.sleep(delay)
 
+_BUG_TYPES = (AttributeError, KeyError, IndexError, TypeError, NameError, ValueError,
+              ZeroDivisionError, AssertionError)
+
+
+def BugTracebacks(e: BaseException) -> list[str]:
+    """Tracebacks of the plain programming errors inside `e` (an exception group
+    is opened up). Network, server and cancellation errors are left out: they
+    are not bugs Orion could repair."""
+    out, stack = [], [e]
+    while stack:
+        x = stack.pop()
+        subs = getattr(x, "exceptions", None)
+        if isinstance(subs, (list, tuple)) and isinstance(x, BaseException) and subs:
+            stack.extend(subs)
+            continue
+        mod = type(x).__module__ or ""
+        if isinstance(x, _BUG_TYPES) and not mod.startswith(("google", "websockets", "aiohttp", "httpx")):
+            out.append("".join(traceback.format_exception(type(x), x, x.__traceback__)))
+    return out
+
+
 def main():
+    CrashWatch.Install()
+    import atexit
+    atexit.register(LocalBrain.Release)    # never leave the model holding the graphics card
     ui = OrionUI()
+    if getattr(ui, "duplicate", False):
+        return                              # the running Orion was asked to show itself
 
     def runner():
         ui.WaitForApiKey()
@@ -2502,6 +2887,10 @@ def main():
             asyncio.run(orion.run())
         except KeyboardInterrupt:
             print("\n🔴 Shutting down...")
+        except Exception:
+            # Orion's brain stopped; the window is still up, so say why.
+            traceback.print_exc()
+            CrashWatch.Report(traceback.format_exc(), "Orion's main loop")
 
     threading.Thread(target=runner, daemon=True).start()
     ui.root.mainloop()

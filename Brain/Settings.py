@@ -104,6 +104,24 @@ def SaveVoice(voice_name: str) -> None:
     CONFIG_FILE.write_text(json.dumps(data, indent=4), encoding="utf-8")
 
 
+# ── The laptop's own voice (Piper: On-device and private mode) ───────────────
+# "" means "the one closest to the Gemini voice" (System/LocalBrain.LIKE_GEMINI).
+def GetLocalVoice() -> str:
+    return str(LoadApiKeys().get("local_voice") or "").strip()
+
+
+def SaveLocalVoice(voice: str) -> None:
+    EnsureConfigDir()
+    data: dict = {}
+    if CONFIG_FILE.exists():
+        try:
+            data = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
+        except Exception:
+            data = {}
+    data["local_voice"] = (voice or "").strip()
+    CONFIG_FILE.write_text(json.dumps(data, indent=4), encoding="utf-8")
+
+
 
 def GetPushToTalkEnabled() -> bool:
     """Hold-a-key-to-speak. When on, the mic is closed unless the chord is held."""
@@ -237,6 +255,26 @@ def GetFastCommandsEnabled() -> bool:
 
 def SaveFastCommandsEnabled(enabled: bool) -> None:
     SaveFlag("fast_commands_enabled", bool(enabled))
+
+
+def GetClipboardHelpEnabled() -> bool:
+    """Offer help when an error, a YouTube link or a GitHub repo is copied
+    (System/ClipboardWatch.py). On by default."""
+    return bool(LoadApiKeys().get("clipboard_help_enabled", True))
+
+
+def SaveClipboardHelpEnabled(enabled: bool) -> None:
+    SaveFlag("clipboard_help_enabled", bool(enabled))
+
+
+def GetCrashAlertsEnabled() -> bool:
+    """Say so when Orion's own code crashes, and offer a repair
+    (System/CrashWatch.py). The crash is kept for "fix yourself" either way."""
+    return bool(LoadApiKeys().get("crash_alerts_enabled", True))
+
+
+def SaveCrashAlertsEnabled(enabled: bool) -> None:
+    SaveFlag("crash_alerts_enabled", bool(enabled))
 
 
 def GetBriefEnabled() -> bool:
@@ -384,6 +422,22 @@ def GetProviderMode() -> str:
         else PROVIDER_MODE_GEMINI
 
 
+BRAIN_MODES = ("auto", "local", "gemini")
+
+
+def GetBrainMode() -> str:
+    """Auto (Gemini, the laptop's own model when Gemini fails), local (On-device:
+    nothing goes to a cloud AI) or gemini (Gemini only). See System/LocalBrain.py.
+    Ignored while "My own setup" (mode "pipeline") is chosen."""
+    mode = str(GetProviders().get("brain", "") or "").strip().lower()
+    return mode if mode in BRAIN_MODES else "auto"
+
+
+def SaveBrainMode(mode: str) -> None:
+    mode = (mode or "").strip().lower()
+    PatchProviders(brain=mode if mode in BRAIN_MODES else "auto")
+
+
 def GetProviderConfig(provider_id: str) -> dict:
     """Stored settings for one provider — address, model, key, limits."""
     creds = GetProviders().get("creds")
@@ -473,7 +527,8 @@ def SaveSidecarFirst(enabled: bool) -> None:
 
 
 def SaveProviders(mode: str = None, pipeline: dict = None, creds: dict = None,
-                   sidecar: str = None, sidecar_first: bool = None) -> None:
+                   sidecar: str = None, sidecar_first: bool = None,
+                   brain: str = None) -> None:
     """Write the whole providers block in ONE file write.
 
     The settings panel used to call five setters in a row — one per provider's
@@ -521,6 +576,9 @@ def SaveProviders(mode: str = None, pipeline: dict = None, creds: dict = None,
         block["sidecar"] = str(sidecar or "").strip()
     if sidecar_first is not None:
         block["sidecar_first"] = bool(sidecar_first)
+    if brain is not None:
+        b = str(brain).strip().lower()
+        block["brain"] = b if b in BRAIN_MODES else "auto"
 
     data["providers"] = block
     CONFIG_FILE.write_text(json.dumps(data, indent=4), encoding="utf-8")

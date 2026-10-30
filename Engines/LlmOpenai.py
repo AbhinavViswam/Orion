@@ -337,6 +337,12 @@ class OpenAICompatLLM:
         self.model = (cfg.get("model") or "").strip()
         self.key = (cfg.get("api_key") or "").strip()
         self.timeout = float(cfg.get("timeout") or 60.0)
+        # Extra request fields (the laptop's own brain sends reasoning_effort
+        # "none": Gemma 4 thinks by default and then says nothing in 160 tokens).
+        extra = cfg.get("extra_body")
+        self.extra = dict(extra) if isinstance(extra, dict) else {}
+        self.max_tokens = IntOr(cfg.get("max_tokens"), None)
+        self.warm = bool(cfg.get("warm", False))
 
         # A budget on a model running on your own hardware, unless the user
         # chose one themselves.
@@ -397,7 +403,29 @@ class OpenAICompatLLM:
             body["tool_choice"] = "auto"
         if temperature is not None:
             body["temperature"] = temperature
+        if self.max_tokens:
+            body["max_tokens"] = self.max_tokens
+        body.update(self.extra)
         return body
+
+    async def warmup(self, messages: list[dict], tools: list[dict] | None = None, log=None) -> None:
+        """Load the model and read the fixed start of the prompt once, before
+        anyone speaks (only when the config asks for it: `warm`). Local servers
+        keep that prefix cached, so the first real answer starts at once."""
+        if not self.warm:
+            return
+        import time
+        t0 = time.monotonic()
+        body = self._body(list(messages) + [{"role": "user", "content": "hi"}], tools, False, None)
+        body["max_tokens"] = 1
+        try:
+            async with self._httpx.AsyncClient(timeout=max(self.timeout, 120.0),
+                                               trust_env=self._trust_env) as cl:
+                r = await cl.post(f"{self.base}/chat/completions", headers=self._Headers(), json=body)
+                r.raise_for_status()
+            print(f"[LLM] warm in {time.monotonic() - t0:.1f}s")
+        except Exception as e:
+            print(f"[LLM] warm-up failed: {e}")
 
     # -- one-shot, synchronous: this is what core/gemini.py's ladder uses ----
     def complete(self, messages: list[dict], tools: list[dict] | None = None,

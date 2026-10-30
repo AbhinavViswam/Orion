@@ -400,8 +400,23 @@ class PipelineEngine:
             warm = getattr(part, "warmup", None)
             if warm is not None:
                 jobs.append(warm(self._log))
+        # The model too, when it asks for it (the laptop's own brain): loading
+        # it and reading the fixed prompt once is most of a cold first answer.
+        warm_llm = getattr(self._llm, "warmup", None)
+        if warm_llm is not None:
+            system = [{"role": "system", "content": self._system}] if self._system else []
+            jobs.append(warm_llm(system, self._tools, self._log))
         if jobs:
             await asyncio.gather(*jobs, return_exceptions=True)
+
+    async def Announce(self, text: str) -> None:
+        """Say one fixed sentence (not from the model), e.g. "I'm on the
+        laptop's own brain for now"."""
+        if self._closed or not text:
+            return
+        await self.Emit(Msg.said(text))
+        await self._Speak(text)
+        await self.Emit(Msg.TurnEnd())
 
     # ── interruption ─────────────────────────────────────────────────────────
     def interrupt(self) -> None:
