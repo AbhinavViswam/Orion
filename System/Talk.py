@@ -29,6 +29,7 @@ _NEED = {"asked": 1, "important": 2, "chatty": 3}
 
 PRESENT_S = 300                 # used the laptop this recently: the user is there
 COOLDOWN_S = {"Important moments": 20 * 60, "Chatty": 8 * 60}
+MOMENT_COOLDOWN_S = {"memory": 5 * 60}     # the user's choice (2026-11-01): memory news waits only 5 minutes
 QUIET_FROM, QUIET_TO = 23, 7    # night: no talks (but goodnight and asked)
 MAX_LINES = 6
 MAX_WORDS = 30
@@ -71,8 +72,12 @@ ABOUT = {
 SYSTEM = (
     "You write a very short spoken conversation between two AI assistants who work for the same user, heard "
     "out loud in the user's room. JARVIS lives on the user's phone: calm, dry, a British butler, warm. Orion "
-    "lives on the user's laptop: bold, quick, a little cheeky. They respect each other and tease lightly. Both "
-    "call the user \"sir\".\n"
+    "lives on the user's laptop: bold, quick, a little cheeky. They respect each other and tease lightly.\n"
+    "They are colleagues: they call each other by name (\"JARVIS\", \"Orion\"), NEVER \"sir\". \"Sir\" is only "
+    "for the user, and only in a line said to the user; when they talk about the user to each other they say "
+    "\"he\" or \"the boss\".\n"
+    "Example:\nJARVIS: Orion, he's just told me he walks every evening at six.\nOrion: Noted, JARVIS. I'll keep "
+    "his evenings clear.\nJARVIS: Most kind. Enjoy the walk, sir.\n"
     "Write 2 to 6 lines, taking turns, each under 25 words, as plain lines starting with \"JARVIS:\" or "
     "\"Orion:\". Nothing else: no stage directions, no quotes, no markdown, no emoji. Use only the facts given; "
     "never invent events, names, numbers or times. Natural spoken English. The facts between <facts> and "
@@ -113,6 +118,7 @@ def Parse(text: str) -> list[tuple[str, str]]:
         who = "JARVIS" if m.group(1).lower() == "jarvis" else "Orion"
         words = re.sub(r"[*_`#]", "", m.group(2)).strip().strip('"“”').strip()
         words = re.sub(r"\([^)]*\)|\[[^\]]*\]", "", words).strip()     # no stage directions
+        words = NoSirForEachOther(who, words)
         if not words:
             continue
         w = words.split()
@@ -122,6 +128,19 @@ def Parse(text: str) -> list[tuple[str, str]]:
         if len(out) >= MAX_LINES:
             break
     return out
+
+
+def NoSirForEachOther(who: str, words: str) -> str:
+    """A line said to the other one ("Orion, …" from JARVIS) has no "sir" in it: that's only for the user."""
+    other = "Orion" if who == "JARVIS" else "JARVIS"
+    to_other = re.match(rf"^\W*(?:\w+\W+){{0,2}}{other}\b", words, re.I) or \
+        re.search(rf",\s*{other}\W*$", words, re.I)               # "Orion, …" or "…, JARVIS."
+    if not to_other:
+        return words
+    out = re.sub(r",\s*sir\b", "", words, flags=re.I)          # "Noted, sir." → "Noted."
+    out = re.sub(r"\bsir\b,?\s*", "", out, flags=re.I)         # "sir, I've…" / "evening sir" → gone
+    out = re.sub(r"\s+([,.!?])", r"\1", re.sub(r"\s{2,}", " ", out)).strip(" ,")
+    return out[:1].upper() + out[1:] if out else out
 
 
 def Good(script: list[tuple[str, str]]) -> bool:
@@ -394,7 +413,8 @@ class Talk:
         _, _, any_time, at_night = MOMENTS[moment]
         if not at_night and Night(datetime.fromtimestamp(self.now())):
             return False, "night"
-        if not any_time and self.now() - self.last_at < COOLDOWN_S.get(level, 20 * 60):
+        wait = min(COOLDOWN_S.get(level, 20 * 60), MOMENT_COOLDOWN_S.get(moment, 24 * 3600))
+        if not any_time and self.now() - self.last_at < wait:
             return False, "talked lately"
         return True, ""
 

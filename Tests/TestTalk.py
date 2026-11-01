@@ -57,6 +57,13 @@ class TestScript(unittest.TestCase):
         self.assertTrue(K.Good(s))
         self.assertFalse(K.Good([("JARVIS", "a"), ("JARVIS", "b")]))
 
+    def TestTheyNeverCallEachOtherSir(self):
+        s = K.Parse("JARVIS: Orion, sir, I've learned he walks at six.\nOrion: Noted, JARVIS, sir.\n"
+                    "Orion: Good evening sir, JARVIS.\nJARVIS: Enjoy the walk, sir.")
+        self.assertEqual(s, [("JARVIS", "Orion, I've learned he walks at six."), ("Orion", "Noted, JARVIS."),
+                             ("Orion", "Good evening JARVIS."), ("JARVIS", "Enjoy the walk, sir.")])
+        self.assertIn("NEVER \"sir\"", K.SYSTEM)
+
     def TestParseCutsLongAndMany(self):
         s = K.Parse("\n".join(f"Orion: {'word ' * 50}" if i == 0 else f"JARVIS: line {i}" for i in range(9)))
         self.assertEqual(len(s), K.MAX_LINES)
@@ -153,9 +160,12 @@ class TestWhen(_Base):
         self.assertTrue(self.k.CanTalk("goodnight")[0])
         self.assertTrue(self.k.CanTalk("asked")[0])
         self.clock[0] = datetime(2026, 11, 1, 18, 0).timestamp()
-        self.k.last_at = self.clock[0] - 5 * 60
+        self.k.last_at = self.clock[0] - 4 * 60
         self.assertEqual(self.k.CanTalk("memory"), (False, "talked lately"))
         self.assertTrue(self.k.CanTalk("call")[0])
+        self.k.last_at = self.clock[0] - 6 * 60
+        self.assertTrue(self.k.CanTalk("memory")[0])            # memory waits only 5 minutes
+        self.assertEqual(self.k.CanTalk("battery"), (False, "talked lately"))
         self.level = "Chatty"
         self.k.last_at = self.clock[0] - 9 * 60
         self.assertTrue(self.k.CanTalk("memory")[0])
