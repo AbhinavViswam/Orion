@@ -6996,6 +6996,24 @@ class MainWindow(QMainWindow):
         self.hide()
         self._floating.show()
 
+    def HideToTray(self) -> None:
+        """Neither look on screen; Orion keeps running and listening. The
+        tray icon brings it back. Without a tray there is no way back, so
+        it floats instead."""
+        tray = getattr(self._floating, "_tray", None) if self._floating is not None else None
+        if tray is None:
+            self.ShowFloating()
+            return
+        self._floating.hide()
+        self.hide()
+        if not getattr(self, "_tray_told", False):     # once per run, not every time
+            self._tray_told = True
+            try:
+                tray.showMessage("Orion", "Still running in the tray. Click the icon to bring it back.",
+                                 tray.MessageIcon.Information, 4000)
+            except Exception:
+                pass
+
     def NeedWindow(self, *_):
         """Something only the window shows (a confirm, a quiz, settings…):
         bring it up if Orion is floating."""

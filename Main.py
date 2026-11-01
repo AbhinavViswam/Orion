@@ -684,6 +684,13 @@ class OrionLive:
         except Exception as e:
             print(f"[PhoneBridge] not started: {e}")
 
+        # Telegram bot (System/TelegramLink.py): listens only once a bot is saved and paired; never blocks startup.
+        try:
+            from System.TelegramLink import LINK as _telegram
+            _telegram.Start(self)
+        except Exception as e:
+            print(f"[Telegram] not started: {e}")
+
         # Restore the saved push-to-talk preference. Doing it here rather than
         # in __init__ means the hotkey thread only exists once there is a
         # session to talk to.
@@ -2566,6 +2573,11 @@ class OrionLive:
         SetTrimNotifier(self.ui.WriteLog)
         Privacy.SetSpeaker(lambda text: asyncio.run_coroutine_threadsafe(self.SpeakPrivately(text), self._loop))
         PhoneBridge.BRIDGE.WrapConfirm(confirm_gate)   # Orion's confirmations reach the phone when you're away
+        try:
+            from System.TelegramLink import LINK as _telegram
+            _telegram.WrapConfirm(confirm_gate)        # …and the Telegram chat, for requests sent from there
+        except Exception as e:
+            print(f"[Telegram] confirmations not linked: {e}")
 
         # Tell the device picker the exact rates the streams open at, from the
         # constants that actually open them — so it can never list a device that

@@ -52,8 +52,16 @@ def MonitorText(alert: str) -> tuple[str, str]:
 
 
 def AlertNow(what: str, title: str, text: str, urgent: bool = False, speak: bool = True) -> bool:
-    """The same, waiting for it to go: for the reminder script, which exits straight after."""
-    if not text or not Enabled(what):
+    """The same, waiting for it to go: for the reminder script, which exits straight after.
+    Also to Telegram, when the user turned that kind on there (System/TelegramLink.py, off by default)."""
+    if not text:
+        return False
+    try:
+        from System import TelegramLink
+        TelegramLink.AlertNow(what, title, text)
+    except Exception:
+        pass
+    if not Enabled(what):
         return False
     try:
         from System import PhoneBridge
@@ -69,6 +77,12 @@ def Alert(what: str, title: str, text: str, urgent: bool = False, speak: bool = 
 def Work(session: str, task: str, state: str) -> None:
     """Orion's long job, shown on the phone like Claude Code's: working / approval / done."""
     def Go():
+        if state == "done":
+            try:
+                from System import TelegramLink
+                TelegramLink.AlertNow("work", "", task)
+            except Exception:
+                pass
         if not Enabled("work"):
             return
         try:

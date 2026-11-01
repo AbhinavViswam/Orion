@@ -221,21 +221,31 @@ class PhoneTasks:
 
     # ── the desk runner ─────────────────────────────────────────────────────
 
-    def Ask(self, task: dict) -> tuple[str, str]:
+    def Ask(self, task: dict, system: Optional[str] = None, history: Optional[list] = None,
+            mark_private: bool = False) -> tuple[str, str]:
+        """One request, start to finish: (state, text).
+
+        `system`: the instructions instead of SYSTEM (the Telegram bot has its own); `{name}` and `{memory}` are
+        filled in. `history`: earlier (request, answer) pairs of the same conversation, oldest first.
+        `mark_private`: a private answer comes back as state "private" instead of "completed"."""
         tid, text = str(task.get("id")), str(task.get("text") or "")
         fast = self._Fast(text) if text and not task.get("files") else None
         if fast:
             return "completed", fast
         if self._Local():
-            return self.AskLocal(task)
+            return self.AskLocal(task, history=history)
         from google.genai import types
+        contents = []
+        for asked, said in history or []:
+            contents.append(types.Content(role="user", parts=[types.Part(text=str(asked))]))
+            contents.append(types.Content(role="model", parts=[types.Part(text=str(said))]))
         parts = [types.Part(text=text or "What is this?")]
         for path in task.get("files") or []:
             part = self._FilePart(Path(path))
             if part is not None:
                 parts.append(part)
-        contents = [types.Content(role="user", parts=parts)]
-        config = self._Config()
+        contents.append(types.Content(role="user", parts=parts))
+        config = self._Config(system)
         started = time.monotonic()
         told_still = False
         for _ in range(ROUNDS):
@@ -262,7 +272,7 @@ class PhoneTasks:
             if private:
                 # Private mode: a private answer goes straight back to the phone (through Link's own
                 # encryption), not through Gemini for wording.
-                return "completed", "\n".join(private)
+                return ("private" if mark_private else "completed"), "\n".join(private)
             contents.append(types.Content(role="user", parts=replies))
         return "completed", "I did several steps but didn't finish. Ask again on the laptop to carry on."
 
@@ -271,7 +281,7 @@ class PhoneTasks:
         from System import LocalBrain
         return LocalBrain.UseLocal(bool(getattr(self.live, "_local_fallback", False)))
 
-    def AskLocal(self, task: dict) -> tuple[str, str]:
+    def AskLocal(self, task: dict, history: Optional[list] = None) -> tuple[str, str]:
         """The desk runner on the laptop's own brain: its small tool set, the same ExecuteTool."""
         from google.genai import types
         from Brain.Memory import LoadMemory
@@ -293,9 +303,13 @@ class PhoneTasks:
         tools = Schema.convert(decls, "openai")
         name = (getattr(self.live, "_asst_name", "") or "Orion").strip().title()
         creator = getattr(sys.modules.get(type(self.live).__module__), "CREATOR", "") or "its maker"
+        where = task.get("where") or "the user's phone"
         system = LocalBrain.Prompt(name, creator, "", LoadMemory()) \
-            + "\n\nThis request was typed on the user's phone; your answer is shown there."
-        messages = [{"role": "system", "content": system}, {"role": "user", "content": text}]
+            + f"\n\nThis request was typed on {where}; your answer is shown there."
+        messages = [{"role": "system", "content": system}]
+        for asked, said in history or []:
+            messages += [{"role": "user", "content": str(asked)}, {"role": "assistant", "content": str(said)}]
+        messages.append({"role": "user", "content": text})
         for n in range(ROUNDS):
             if tid in self.cancelled:
                 return "canceled", "Cancelled."
@@ -344,12 +358,12 @@ class PhoneTasks:
         decls = self.live.ToolDecls()          # the same list the voice session is given
         return StripMeta([d for d in decls if isinstance(d, dict) and d.get("name") not in NOT_FOR_PHONE])
 
-    def _Config(self):
+    def _Config(self, template: Optional[str] = None):
         from google.genai import types
         from Brain.Memory import FormatMemoryForPrompt, LoadMemory
         name = getattr(self.live, "_asst_name", "") or "Orion"
         from Brain import Privacy
-        system = SYSTEM.format(name=name.strip().title(),
+        system = (template or SYSTEM).format(name=name.strip().title(),
                                memory=FormatMemoryForPrompt(Privacy.ForGemini(LoadMemory())) or "")
         return types.GenerateContentConfig(
             system_instruction=system,

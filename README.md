@@ -99,6 +99,20 @@ Stereo Mix. Settings › Plugins sets the greeting, the device, the time limit a
 Gemini writes the message down. "What messages did I get?" reads past notes, saved in
 `Config/CallSecretary/`.
 
+**Telegram** (plugin, `Plugins/TelegramBot.py`; the bot is `System/TelegramLink.py`). Message Orion from
+anywhere through a Telegram bot of your own, like JARVIS's Telegram remote:
+1. In Telegram, message @BotFather, send `/newbot`, and copy the token. Give Orion its own bot, not JARVIS's.
+2. Paste it in Settings › Plugins › Telegram and press **Save token**.
+3. Send the 6-digit code it shows to your bot. Only that Telegram account is obeyed from then on.
+
+Anything you write is done on the laptop and answered in the chat (text only, nothing said out loud). Risky
+actions ask with Yes / No buttons. Messages more than 5 minutes old are not run. Private answers stay on the
+laptop unless you turn on "Send private answers here". The "/" menu has /status, /mute, /unmute, /stop,
+/screenshot, /calls, /new, /undo and /reconnect. Photos and files work too, and a file with no caption is just
+saved to Downloads\From Telegram. Reminders, call messages, alerts and finished long jobs can also come to
+Telegram, each behind its own switch (all off at first). The token is kept encrypted for your Windows account in
+`Config/Telegram.json`. Telegram can read what passes through a bot.
+
 **Usage** (Settings › Usage) shows the tokens Orion used today and over the last 14 days,
 and how often each tool ran, how often it worked and how long it took. It is counted on
 this computer from what Gemini reports, and stored in `Brain/Usage.json` (git-ignored).

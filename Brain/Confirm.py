@@ -53,10 +53,12 @@ class _Pending:
     detail:  str
     run:     Callable[[], str]
     at:      float
+    id:      int = 0
 
 
 _pending: Optional[_Pending] = None
 _lock = threading.Lock()
+_next_id = 0      # each confirmation's own number: an old Telegram button can't answer a newer question
 
 # Set once at startup by Main.py. Signature: (title, detail) -> None for show,
 # and () -> None for hide. Both are marshalled onto the Qt thread by the UI.
@@ -88,7 +90,7 @@ def request(key: str, title: str, detail: str, run: Callable[[], str]) -> str:
     Returns the sentence the tool should hand back to the model — phrased as an
     instruction so the assistant asks the user out loud in their own language,
     rather than reading an English string verbatim."""
-    global _pending
+    global _pending, _next_id
 
     if _show_cb is None:
         # No interface bound (headless, or a very early call). Refuse rather
@@ -97,8 +99,9 @@ def request(key: str, title: str, detail: str, run: Callable[[], str]) -> str:
                 f"not available, so I have not done it.")
 
     with _lock:
+        _next_id += 1
         _pending = _Pending(key=key, title=title, detail=detail,
-                            run=run, at=time.monotonic())
+                            run=run, at=time.monotonic(), id=_next_id)
 
     try:
         _show_cb(title, detail)
@@ -125,8 +128,11 @@ def request(key: str, title: str, detail: str, run: Callable[[], str]) -> str:
     )
 
 
-def resolve(accepted: bool) -> None:
+def resolve(accepted: bool, pid: Optional[int] = None) -> None:
     """Called by the UI when the user presses CONFIRM or CANCEL.
+
+    `pid`: answer only this confirmation (a Telegram tap carries the id it was
+    asked with); a newer one waiting is left alone.
 
     Runs the stored callable on a worker thread — this is invoked from the Qt
     thread, and shutting the machine down from inside a button handler would
@@ -134,6 +140,8 @@ def resolve(accepted: bool) -> None:
     global _pending
 
     with _lock:
+        if pid is not None and (_pending is None or _pending.id != pid):
+            return
         p, _pending = _pending, None
 
     if _hide_cb:
@@ -172,3 +180,19 @@ def PendingTitle() -> str:
         if time.monotonic() - _pending.at > TIMEOUT_SECONDS:
             return ""
         return _pending.title
+
+
+def PendingId() -> int:
+    """The waiting confirmation's number, or 0 when nothing is waiting (or it expired)."""
+    with _lock:
+        if _pending is None or time.monotonic() - _pending.at > TIMEOUT_SECONDS:
+            return 0
+        return _pending.id
+
+
+def PendingDetail() -> tuple[str, str, str]:
+    """(key, title, detail) of the waiting confirmation; empty strings when none."""
+    with _lock:
+        if _pending is None or time.monotonic() - _pending.at > TIMEOUT_SECONDS:
+            return "", "", ""
+        return _pending.key, _pending.title, _pending.detail

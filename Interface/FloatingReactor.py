@@ -8,7 +8,7 @@ there is never a second renderer, and the hidden window draws nothing.
     drag            move it (the place is remembered)
     click           type to Orion
     double-click    open the full window
-    right-click     the menu: window, type, mic, stop, settings, size, quit
+    right-click     the menu: window, type, mic, stop, hide, settings, size, quit
 
 Closing the full window brings the reactor back instead of quitting; Quit is in
 the menus. A second launch of Orion only shows the running one (a local socket,
@@ -109,6 +109,7 @@ class FloatingReactor(QWidget):
         self._dragged = False
         self._blink = True
         self._blink_t = 0.0
+        self._tray = None              # set by MakeTray; no tray means no hiding
 
         self._input = QLineEdit(self)
         self._input.setPlaceholderText("Type to Orion…  (Esc to close)")
@@ -161,6 +162,9 @@ class FloatingReactor(QWidget):
 
     def ReactorRect(self) -> QRectF:
         return QRectF((self.width() - self._side) / 2, 0, self._side, self._side)
+
+    def CanHide(self) -> bool:
+        return self._tray is not None
 
     # ── showing ───────────────────────────────────────────────────────────────
     def showEvent(self, e):
@@ -260,7 +264,7 @@ class FloatingReactor(QWidget):
             p.drawImage(rect, bloom)
             p.drawImage(rect, crisp)
             p.restore()
-        y = rect.bottom() + self._GAP
+        y =rect.bottom() + self._GAP
         text, colour = self.Status()
         self.Pill(p, y, text, colour, 8, True)
         cap = self.Caption()
@@ -364,6 +368,9 @@ class FloatingReactor(QWidget):
             Add(m, "Show floating reactor", self._win.ShowFloating)
         Add(m, "Turn the mic on" if self._win._muted else "Mute the mic", self._win.ToggleMute)
         Add(m, "Stop talking", self._win.DoInterrupt)
+        if self.CanHide():
+            if self.isVisible() or self._win.isVisible():
+                Add(m, "Hide to tray", self._win.HideToTray)
         m.addSeparator()
         Add(m, "Settings", lambda: (self._win.ShowWindow(), self._win.OpenSettings("")))
         size = m.addMenu("Reactor size")
@@ -374,18 +381,22 @@ class FloatingReactor(QWidget):
 
 
 def MakeTray(win, floating: FloatingReactor):
-    """The tray icon: click to switch between the reactor and the window."""
+    """The tray icon: click to switch between the reactor and the window, or
+    to bring Orion back after "Hide to tray"."""
     if not QSystemTrayIcon.isSystemTrayAvailable():
         return None
     tray = QSystemTrayIcon(QApplication.windowIcon(), win)
     tray.setToolTip(win._assistant_name.title() if win._assistant_name else "Orion")
+    floating._tray = tray
 
     def Activated(reason):
         if reason == QSystemTrayIcon.ActivationReason.Trigger:
             if win.isVisible():
                 win.ShowFloating()
-            else:
+            elif floating.isVisible():
                 win.ShowWindow()
+            else:                      # hidden in the tray: back as the reactor
+                win.ShowFloating()
 
     tray.activated.connect(Activated)
     menu = QMenu()

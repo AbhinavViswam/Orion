@@ -60,7 +60,7 @@ def Run(tasks: PhoneTasks, task: dict) -> list:
 class TestDeskRunner(unittest.TestCase):
     def setUp(self):
         self.live = FakeLive()
-        self.config = mock.patch.object(PhoneTasks, "_Config", lambda self: None)
+        self.config = mock.patch.object(PhoneTasks, "_Config", lambda self, template=None: None)
         self.config.start()
 
     def tearDown(self):
@@ -230,7 +230,7 @@ class TestWholeRoad(unittest.TestCase):
         patches = [mock.patch.object(PhoneBridge, "STORE", Path(tempfile.mkdtemp()) / "PhoneLink.json"),
                    mock.patch.object(PhoneBridge, "LINK_PORT", L.PORT),
                    mock.patch.object(PhoneBridge, "WAIT_S", 1),
-                   mock.patch.object(PhoneTasks, "_Config", lambda self: None)]
+                   mock.patch.object(PhoneTasks, "_Config", lambda self, template=None: None)]
         for p in patches:
             p.start()
         try:

@@ -134,6 +134,33 @@ class TestTwoLooks(unittest.TestCase):
             self.assertIn(want, texts)
         self.assertTrue(any(t in texts for t in ("Mute the mic", "Turn the mic on")))
 
+    def TestNoTrayMeansNoHiding(self):
+        self.assertFalse(self.f.CanHide())
+        texts = [a.text() for a in self.f.Menu().actions()]
+        self.assertNotIn("Hide to tray", texts)
+        self.w.HideToTray()                            # falls back to floating
+        Pump(30)
+        self.assertTrue(self.f.isVisible())
+
+    def TestHideToTrayAndBack(self):
+        tray = mock.MagicMock()
+        self.f._tray = tray
+        try:
+            self.assertIn("Hide to tray", [a.text() for a in self.f.Menu().actions()])
+            self.w.HideToTray()
+            Pump(30)
+            self.assertFalse(self.f.isVisible())
+            self.assertFalse(self.w.isVisible())
+            self.assertFalse(self.w.hud.float_on)      # nothing drawn while hidden
+            tray.showMessage.assert_called_once()
+            self.w.HideToTray()
+            tray.showMessage.assert_called_once()      # told only once
+            self.f.Summon()                            # a second launch brings it back
+            Pump(30)
+            self.assertTrue(self.f.isVisible())
+        finally:
+            self.f._tray = None
+
     def TestSizeIsRemembered(self):
         self.f.SetSide(110)
         self.assertEqual(self.FR.Load()["size"], 110)
