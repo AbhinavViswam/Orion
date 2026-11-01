@@ -13,6 +13,11 @@ listens, thinks and breathes as it speaks.
 
 Needs **Python 3.11 or newer**.
 
+**Windows, the easy way:** double-click `setup.bat` once (it makes `.venv` and
+installs everything), then `start.bat` to run Orion with no console window.
+
+By hand:
+
 ```bash
 cd Orion
 python -m venv .venv
