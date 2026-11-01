@@ -561,6 +561,9 @@ class OrionLive:
         self._loop                     = None
         self._is_speaking         = False
         self._speaking_lock       = threading.Lock()
+        self._talking             = False   # Orion and JARVIS talking out loud (System/Talk.py): mic not sent
+        self._interrupts          = 0       # counts clicks that stopped speech (a talk line checks it)
+        self._talk                = None    # System/Talk.py, once the phone bridge is up
         self._pending_vision       = None    # (img_bytes, mime_type, question, angle) to inject after tool response
         self._vision_cam_active    = False   # True if camera was opened for vision → auto-close after response
         self._vision_close_pending = False   # True after vision injected; next turn_complete closes camera
@@ -680,6 +683,10 @@ class OrionLive:
             self._together = Together(self)
             PhoneBridge.BRIDGE.together = self._together
             self._together.Start()
+            from System.Talk import Talk
+            self._talk = Talk(self, self._together)
+            self._together.talk = self._talk
+            self._talk.Start()
             PhoneBridge.BRIDGE.Start(lambda: {"muted": self.ui.muted, "speaking": self._is_speaking})
         except Exception as e:
             print(f"[PhoneBridge] not started: {e}")
@@ -1030,6 +1037,9 @@ class OrionLive:
     def interrupt(self) -> None:
         """Stop ORION mid-speech: drain queued audio and open mic immediately."""
         self._interrupted = True
+        self._interrupts += 1
+        if self._talk is not None:
+            self._talk.Stop()          # a talk with JARVIS stops too
         q = self.audio_in_queue
         if q:
             drained = 0
@@ -1312,6 +1322,55 @@ class OrionLive:
                 await self.SpeakPrivately(spoken)
         return reply
 
+    def SpeakLine(self, text: str, timeout: float = 40.0) -> bool:
+        """One of Orion's lines in a talk with JARVIS (System/Talk.py), in Orion's own voice (Piper, else the
+        Windows voice), through the same speaker queue so the reactor moves. Blocks until it has played; False
+        when it couldn't be said or a click stopped it. From a worker thread, never the event loop."""
+        loop, q = self._loop, self.audio_in_queue
+        if loop is None or q is None or not str(text or "").strip():
+            return False
+        before = self._interrupts
+
+        async def Make() -> bool:
+            tts = await asyncio.to_thread(self.PrivateVoice)
+            if tts is None:
+                return False
+            async for pcm in tts.Speak(text):
+                if self._interrupts != before:
+                    return False
+                for i in range(0, len(pcm or b""), 4800):
+                    q.put_nowait(pcm[i:i + 4800])
+            return True
+
+        try:
+            if not asyncio.run_coroutine_threadsafe(Make(), loop).result(timeout):
+                return False
+        except Exception as e:
+            print(f"[Talk] Orion's line failed: {e}")
+            return False
+        end = time.monotonic() + timeout
+        time.sleep(0.4)
+        while time.monotonic() < end:
+            if self._interrupts != before:
+                return False
+            if not self._is_speaking and q.empty():
+                break
+            time.sleep(0.15)
+        return self._interrupts == before
+
+    def AddContext(self, text: str) -> None:
+        """A note for the voice session, with no reply asked for (turn not complete). Thread-safe; nothing
+        when no session is connected."""
+        if not self._loop or not self.session:
+            return
+        try:
+            asyncio.run_coroutine_threadsafe(
+                self.session.send_client_content(turns={"role": "user", "parts": [{"text": text}]},
+                                                 turn_complete=False),
+                self._loop)
+        except Exception as e:
+            print(f"[Talk] context not added: {e}")
+
     async def SpeakPrivately(self, text: str) -> None:
         """Read `text` out with Orion's own voice on the laptop (not Gemini's), through the same
         speaker queue as everything else, so the reactor moves and a click stops it."""
@@ -1369,7 +1428,11 @@ class OrionLive:
         if task:
             self._phone_job_n = getattr(self, "_phone_job_n", 0) + 1
             session = f"{fc.name}:{self._phone_job_n}"
-            told = threading.Timer(15.0, lambda: AlertBus.Work(session, task, "working"))
+            def Long():
+                AlertBus.Work(session, task, "working")
+                if self._talk is not None:
+                    self._talk.JobStarted(session, task)      # "leaving" talk: still running when you lock
+            told = threading.Timer(15.0, Long)
             told.daemon = True
             told.start()
         try:
@@ -1377,6 +1440,8 @@ class OrionLive:
         finally:
             if task:
                 told.cancel()
+                if self._talk is not None:
+                    self._talk.JobDone(session)
                 if time.monotonic() - started >= 15.0:
                     AlertBus.Work(session, task, "done")
         try:
@@ -1646,8 +1711,9 @@ class OrionLive:
                 self._echo.reset()
 
             # Hold to speak works through mute itself: the chord unmutes and
-            # releasing it mutes, so the check below covers it.
-            if not self.ui.muted:
+            # releasing it mutes, so the check below covers it. While Orion and
+            # JARVIS talk out loud, JARVIS's voice is not sent to the model.
+            if not self.ui.muted and not self._talking:
                 data = indata.tobytes()
                 loop.call_soon_threadsafe(
                     self.out_queue.put_nowait,

@@ -39,7 +39,28 @@ SWITCHES = {"phone_listening": "one_voice", "phone_idle": "one_voice", "phone_ca
             "activity": "activity", "home": "home", "memory_offer": "memory", "memory_request": "memory",
             "privacy": "privacy"}
 
+LOW_BATTERY = 15
+GOODNIGHT = re.compile(r"\bgood\s*night\b|\bgoodnite\b|\bnight night\b", re.I)
+
 _lock = threading.Lock()
+
+
+def Speakable(items: list[dict]) -> tuple[list, int]:
+    """Memory items as (key, value) pairs to say out loud, and how many were left out: the private kinds while
+    private mode is on are only counted, never named."""
+    try:
+        from Brain import Privacy
+        p = Privacy.Get()
+        hidden_kinds = set(p.get("kinds") or []) if p.get("on") else set()
+    except Exception:
+        hidden_kinds = set()
+    pairs, hidden = [], 0
+    for i in items:
+        if i.get("category") in hidden_kinds:
+            hidden += 1
+        elif i.get("key") and i.get("value"):
+            pairs.append((str(i["key"]).replace("_", " "), str(i["value"])[:80]))
+    return pairs, hidden
 
 
 def On(key: str) -> bool:
@@ -163,6 +184,18 @@ def Tombstones() -> list[dict]:
     return out
 
 
+LAST_LEARNED: list[dict] = []      # the last Merge's new values from the phone (for the talk, System/Talk.py)
+LAST_CONFLICTS: list[dict] = []    # ...and where both changed the same thing within a day, differently
+CONFLICT_S = 24 * 3600
+
+
+def _Close(a: str, b: str) -> bool:
+    try:
+        return abs((datetime.fromisoformat(a) - datetime.fromisoformat(b)).total_seconds()) < CONFLICT_S
+    except Exception:
+        return False
+
+
 def Merge(items: list[dict]) -> int:
     """What the phone sent, merged into Orion's memory. Returns how many entries changed."""
     from Brain.Memory import EntryValue, LoadMemory, SaveMemory
@@ -170,6 +203,7 @@ def Merge(items: list[dict]) -> int:
     st = State()
     stamps, tombs, from_phone = st.get("stamps", {}), st.get("tombstones", {}), st.get("from_phone", {})
     changed = 0
+    learned, conflicts = [], []
     for it in items:
         cat = str(it.get("category"))
         if cat not in CATEGORIES or not it.get("key"):
@@ -196,6 +230,12 @@ def Merge(items: list[dict]) -> int:
             continue
         if have_key is not None and theirs <= mine:
             continue                               # Orion's is newer (a tie keeps Orion's)
+        # Orion set it itself (an exact time is known) less than a day before JARVIS changed it: ask the user.
+        if have_key is not None and src == "jarvis" and Source(have) == "orion" and stamps.get(k) \
+                and _Close(stamps[k], theirs):
+            conflicts.append({"category": cat, "key": str(it["key"]), "mine": EntryValue(have), "theirs": value})
+        else:
+            learned.append({"category": cat, "key": str(it["key"]), "value": value})
         entry = {"value": value, "updated": theirs[:10] or datetime.now().strftime("%Y-%m-%d")}
         if src == "jarvis":
             entry["source"] = "jarvis"
@@ -207,6 +247,8 @@ def Merge(items: list[dict]) -> int:
     if changed:
         SaveMemory(memory)
     SetState(stamps=stamps, tombstones=tombs, from_phone=from_phone)
+    LAST_LEARNED[:] = learned
+    LAST_CONFLICTS[:] = conflicts
     return changed
 
 
@@ -221,6 +263,8 @@ class Together:
         self.home_muted = False
         self.phone_state: dict = {}
         self._offered: dict[str, str] = {}
+        self.talk = None                          # System/Talk.py: talking out loud with JARVIS
+        self.left_home_at = 0.0
 
     def Start(self) -> None:
         """Every half minute: offer memory items Orion learned (after the first sync)."""
@@ -250,6 +294,11 @@ class Together:
 
     def Handle(self, ev: dict) -> None:
         kind = str(ev.get("type"))
+        if self.talk is not None:
+            self.talk.last_phone_event = time.time()   # the phone is there: JARVIS is running
+            if kind.startswith("talk_"):
+                self.talk.Handle(ev)
+                return
         if not On(SWITCHES.get(kind, "")):
             return
         fn = getattr(self, "On_" + kind, None)
@@ -290,7 +339,11 @@ class Together:
     def On_briefing_handoff(self, ev) -> None:
         give = getattr(self.live, "GiveBriefingNow", None)
         if callable(give) and State().get("orion_briefed") != Today():
-            give()
+            # Out loud first (JARVIS adds the phone's news), then the briefing; at once if they can't talk now.
+            if self.talk is not None:
+                self.talk.Moment("briefing", self.talk.PhoneFacts(), after=give)
+            else:
+                give()
 
     def ShouldBrief(self) -> bool:
         """At Orion's start: not if the phone gave today's briefing already."""
@@ -303,8 +356,14 @@ class Together:
 
     # D5
     def On_phone_state(self, ev) -> None:
+        before = self.phone_state.get("battery")
         self.phone_state = {"battery": ev.get("battery"), "charging": bool(ev.get("charging")),
                             "unread": ev.get("unread"), "at": time.time()}
+        b = ev.get("battery")
+        # Low and not charging, just now: they mention it.
+        if self.talk is not None and isinstance(b, int) and b <= LOW_BATTERY and not ev.get("charging") \
+                and (before is None or before > LOW_BATTERY):
+            self.talk.Moment("battery", self.talk.PhoneFacts())
 
     def PhoneRing(self) -> Optional[tuple[float, str, str]]:
         """(percent, text, tooltip) for the top bar, or None when the phone hasn't said for 15 minutes."""
@@ -318,10 +377,28 @@ class Together:
 
     # D6
     def On_activity(self, ev) -> None:
-        AddActivity("phone", str(ev.get("line") or ""), ev.get("at"))
+        line = str(ev.get("line") or "")
+        AddActivity("phone", line, ev.get("at"))
+        if self.talk is not None and line.strip():
+            if not self.Goodnight(line):
+                self.talk.Moment("activity", {"lines": [" ".join(line.split())[:120]]})
+
+    def Goodnight(self, text: str) -> bool:
+        """"Good night" said to either, in the evening, once a day: they wish each other good night."""
+        h = datetime.now().hour
+        if self.talk is None or not GOODNIGHT.search(text or "") or not (h >= 20 or h < 4):
+            return False
+        day = (date.today() - timedelta(days=1)).isoformat() if h < 4 else Today()
+        if State().get("talk_goodnight") == day:
+            return False
+        SetState(talk_goodnight=day)
+        today = [r.get("line", "") for r in Activity() if r.get("at", 0) >= time.time() - 16 * 3600][-6:]
+        self.talk.Moment("goodnight", {**self.talk.PhoneFacts(), "today": today})
+        return True
 
     def OnTurn(self, user_text: str) -> None:
         """A finished turn at the laptop: one line in the shared log, and the same line to the phone."""
+        self.Goodnight(user_text)
         if self.PhoneTurn() or not user_text.strip() or not On("activity"):
             return
         line = " ".join(user_text.split())[:100]
@@ -333,12 +410,22 @@ class Together:
         from System import PhoneBridge
         ui = self.live.ui
         if not ev.get("at_home"):
+            self.left_home_at = time.time()
             if not ui.muted and PhoneBridge.IdleSeconds() >= AWAY_FOR_HOME_S:
                 ui.SetMicMuted(True, "You left home")
                 self.home_muted = True
-        elif self.home_muted:
+            return
+        if self.home_muted:
             self.home_muted = False
             ui.SetMicMuted(False, "")
+        # Back home: they greet each other once you're at the laptop (it waits up to 3 hours for that). Only after
+        # Orion saw the phone leave: JARVIS says "at home" each time it starts too.
+        if self.talk is not None and self.left_home_at:
+            left, self.left_home_at = self.left_home_at, 0.0
+            laptop = [r.get("line", "") for r in Activity()
+                      if r.get("device") == "laptop" and r.get("at", 0) >= int(left)][-5:]
+            away = int((time.time() - left) / 60) if left else 0
+            self.talk.Moment("welcome", {**self.talk.PhoneFacts(), "laptop": laptop, "away_min": away})
 
     # D3
     def On_memory_offer(self, ev) -> None:
@@ -350,6 +437,15 @@ class Together:
                 self.live.ui.WriteLog(f"SYS: Memory synced with your phone — {n} updated")
             except Exception:
                 pass
+        # Out loud: what JARVIS learned (not the whole list sent on connecting), and any disagreement.
+        if self.talk is not None and not ev.get("first"):
+            pairs, hidden = Speakable(LAST_LEARNED)
+            if pairs or hidden:
+                self.talk.Moment("memory", {"from_jarvis": pairs, "hidden": hidden})
+            for c in LAST_CONFLICTS[:1]:
+                if not Speakable([c])[1]:
+                    self.talk.Moment("conflict", {"category": c["category"], "key": c["key"].replace("_", " "),
+                                                  "mine": c["mine"], "theirs": c["theirs"]})
 
     def On_memory_request(self, ev) -> None:
         self.OfferAll()
@@ -444,4 +540,7 @@ class Together:
         SetState(stamps=stamps, tombstones=tombs)
         if fresh:
             self.SendLater("memory_offer", items=fresh, first=False)
+            pairs, hidden = Speakable([i for i in fresh if not i.get("deleted")])
+            if self.talk is not None and (pairs or hidden):
+                self.talk.Moment("memory", {"from_orion": pairs, "hidden": hidden})
         return len(fresh)

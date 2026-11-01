@@ -4,7 +4,7 @@ Link on this PC. Pairing, the connection and the sending live in System/PhoneBri
 this file is the settings section (code box, Connect / Disconnect, a switch for each kind of news) and a small tool
 so "is my phone connected?" and "connect to JARVIS Link" have an answer.
 """
-from System import PhoneBridge
+from System import PhoneBridge, Talk
 from System.AlertBus import NAMESPACE
 
 
@@ -48,6 +48,10 @@ PLUGIN_SETTINGS = {
          "hint": "Everything either one learns is kept the same on both, automatically; the newest wins"},
         {"key": "privacy", "label": "One private mode with JARVIS", "type": "toggle", "default": True,
          "hint": "Private mode and its kinds (⚙ › Privacy) stay the same on both; the newest change wins"},
+        {"key": "talk", "label": "Talk out loud with JARVIS", "type": "choice", "options": Talk.LEVELS,
+         "default": Talk.DEFAULT_LEVEL,
+         "hint": "Orion and JARVIS speak to each other when they share something, only while you're at the "
+                 "laptop. Click Orion or tap JARVIS to stop them"},
     ],
     "action": {"label": _Label, "run": _Act, "busy": "Connecting…"},
 }
@@ -58,15 +62,18 @@ PLUGIN = {
         "Orion's link to JARVIS on the user's phone, through JARVIS Link on this PC. action 'send' when the user "
         "says 'send this to my phone' / 'put it on my phone': a short note (title + text), a link (url) and/or a "
         "file (file_path, full path on this PC) arrive on the phone. action 'status' answers 'is my phone "
-        "connected?'. action 'connect' when the user asks to connect or pair Orion with JARVIS Link or the phone: "
+        "connected?' and 'is JARVIS on / running on my phone?'. action 'connect' when the user asks to connect or pair Orion with JARVIS Link or the phone: "
         "it tells them where to type the code (you cannot type it). action 'activity' answers 'what did I do on "
         "my phone / ask JARVIS today?' from the shared activity log. action 'sync_memory' when the user asks to "
-        "sync or share memory with JARVIS (it also happens by itself)."
+        "sync or share memory with JARVIS (it also happens by itself). action 'talk' when the user asks you and "
+        "JARVIS to talk to each other out loud ('you two, talk', 'ask JARVIS out loud', 'say hi to JARVIS'): "
+        "put what about in topic; you then say nothing more yourself, the two of you speak in turns."
     ),
     "parameters": {
         "type": "OBJECT",
         "properties": {
-            "action": {"type": "STRING", "description": "send | status | connect | activity | sync_memory"},
+            "action": {"type": "STRING", "description": "send | status | connect | activity | sync_memory | talk"},
+            "topic": {"type": "STRING", "description": "talk: what to talk about, in a few words (may be empty)"},
             "title": {"type": "STRING", "description": "send: a few words, e.g. 'Flights to Delhi'"},
             "text": {"type": "STRING", "description": "send: the note itself, short (up to ~600 characters)"},
             "url": {"type": "STRING", "description": "send: a web link to open on the phone (http/https)"},
@@ -94,6 +101,19 @@ def run(parameters: dict, player=None, session_memory=None) -> str:
     if action == "sync_memory":
         together = PhoneBridge.BRIDGE.together
         return together.SyncNow() if together is not None else "The phone link isn't running yet."
+    if action == "talk":
+        together = PhoneBridge.BRIDGE.together
+        talk = getattr(together, "talk", None)
+        if talk is None:
+            return "The phone link isn't running yet."
+        if Talk.Level() == "Off":
+            return "Talking out loud with JARVIS is off (Settings › Plugins › JARVIS Link (phone))."
+        ok, why = talk.CanTalk("asked")
+        if not ok:
+            return f"JARVIS can't talk right now: {why}."
+        topic = " ".join(str(p.get("topic") or "").split())[:200]
+        talk.Moment("asked", {**talk.PhoneFacts(), **({"topic": topic} if topic else {})})
+        return "JARVIS and you are about to talk out loud. Say nothing more now: just stop."
     text, ok = PhoneBridge.BRIDGE.Status()
     if action == "connect":
         if PhoneBridge.Load():

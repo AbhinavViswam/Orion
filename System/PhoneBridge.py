@@ -34,6 +34,7 @@ STORE = CONFIG_DIR / "PhoneLink.json"
 WAIT_S = 20                    # Orion's long wait for work from the phone (Link caps it at 25)
 BACKOFF_S = (30, 60, 120, 240, 300)
 CARD_EVERY_S = 300             # the card is sent again this often, and at once when muted / speaking change
+STATUS_EVERY_S = 30            # Link's status (is JARVIS running on the phone?) is asked this often
 CAN = ["web_search", "browser", "flights", "dev_agent", "files", "screen", "call_secretary", "reminders"]
 
 _lock = threading.Lock()
@@ -201,6 +202,10 @@ class Bridge:
         self.connected = False
         self.note = ""                 # why it isn't connected, for the settings page
         self.phones = 0
+        # JARVIS running on the phone: Link says so while the phone checks in with it (it does while JARVIS runs).
+        # None: not known (Link not reached, or an older Link that doesn't say).
+        self.jarvis_on: Optional[bool] = None
+        self._status_at = 0.0
         self._wake = threading.Event()
         self._stop = threading.Event()
         self._started = False
@@ -237,9 +242,19 @@ class Bridge:
     def OnUnpaired(self, note: str) -> None:
         self._Set(False, note)
 
+    def ReadStatus(self) -> None:
+        """Link's status: how many phones are paired, and whether JARVIS is running on one now."""
+        data = Sealed("status").get("data") or {}
+        self.phones = int(data.get("phones", 0) or 0)
+        listening = data.get("phone_listening")
+        self.jarvis_on = bool(listening) if listening is not None else None
+        self._status_at = time.time()
+
     def _Set(self, connected: bool, note: str = "") -> None:
         changed = connected != self.connected
         self.connected, self.note = connected, note
+        if not connected:
+            self.jarvis_on = None
         if changed:
             try:
                 self.on_change()
@@ -270,7 +285,7 @@ class Bridge:
             try:
                 if not self.connected:
                     self.SendCard()
-                    self.phones = int((Sealed("status").get("data") or {}).get("phones", 0))
+                    self.ReadStatus()
                     self._Set(True)
                     if self.together is not None:
                         self.together.OnConnected()   # one shared memory: both send everything on connect
@@ -293,7 +308,8 @@ class Bridge:
                 self._wake.clear()
 
     def _Watch(self) -> None:
-        """Sends the card again when muted / speaking change (at most every 2 s), and every few minutes."""
+        """Sends the card again when muted / speaking change (at most every 2 s), and every few minutes; asks
+        Link's status every half minute (is JARVIS running on the phone)."""
         while not self._stop.is_set():
             time.sleep(2)
             if not self.connected:
@@ -304,6 +320,13 @@ class Bridge:
                     self.SendCard()
                 except Exception:
                     pass
+            if time.time() - self._status_at > STATUS_EVERY_S:
+                try:
+                    self.ReadStatus()
+                except Exception:
+                    # Link went away: the main loop notices and reconnects; until then JARVIS is not known.
+                    self.jarvis_on = None
+                    self._status_at = time.time()
 
     def OnTask(self, task: dict) -> None:
         if not isinstance(task, dict):
@@ -378,14 +401,24 @@ class Bridge:
             return (self.note or "Not connected"), False
         if self.connected:
             phones = f" · {self.phones} phone{'s' if self.phones != 1 else ''} paired" if self.phones else ""
-            return f"Connected to JARVIS Link on {d.get('pc_name') or 'this PC'}{phones}", True
+            return f"Connected to JARVIS Link on {d.get('pc_name') or 'this PC'}{phones}{self.JarvisWords()}", True
         return (self.note or "Connecting to JARVIS Link…"), False
 
-    def Dot(self) -> Optional[bool]:
-        """The top bar's link dot: None (never paired, hidden), True connected, False paired but not reachable."""
+    def JarvisWords(self) -> str:
+        """' · JARVIS on the phone: running' (or 'not running'); '' when not known."""
+        if self.jarvis_on is None:
+            return ""
+        return " · JARVIS on the phone: " + ("running" if self.jarvis_on else
+                                              "not running (or the phone can't reach this PC)")
+
+    def Dot(self) -> Optional[str]:
+        """The top bar's link dot: None (never paired, hidden), 'jarvis' (JARVIS running on the phone), 'link'
+        (Link connected, JARVIS not running or not known), 'down' (paired but Link not reachable)."""
         if not Load():
             return None
-        return self.connected
+        if not self.connected:
+            return "down"
+        return "jarvis" if self.jarvis_on else "link"
 
 
 BRIDGE = Bridge()

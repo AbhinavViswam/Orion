@@ -130,7 +130,26 @@ class TestPairingAndFrames(unittest.TestCase):
         bridge.Stop()
         self.assertTrue(bridge.connected)
         self.assertTrue(bridge.Status()[1])
-        self.assertTrue(bridge.Dot())
+        self.assertEqual(bridge.Dot(), "link")             # no phone has checked in: JARVIS not running
+
+    def TestKnowsWhenJarvisRuns(self):
+        self.Pair()
+        bridge = PhoneBridge.Bridge()
+        bridge.connected = True
+        self.L._phone_seen["t"] = 0.0
+        bridge.ReadStatus()
+        self.assertIs(bridge.jarvis_on, False)
+        self.assertEqual(bridge.Dot(), "link")
+        self.assertIn("not running", bridge.JarvisWords())
+        self.L._phone_seen["t"] = time.time()               # the phone's watcher checked in: JARVIS is running
+        bridge.ReadStatus()
+        self.assertIs(bridge.jarvis_on, True)
+        self.assertEqual(bridge.Dot(), "jarvis")
+        self.assertIn("JARVIS on the phone: running", bridge.Status()[0])
+        bridge._Set(False, "gone")                           # Link lost: not known
+        self.assertIsNone(bridge.jarvis_on)
+        self.assertEqual(bridge.Dot(), "down")
+        self.L._phone_seen["t"] = 0.0
 
 
 class TestWords(unittest.TestCase):

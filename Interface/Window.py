@@ -5579,10 +5579,13 @@ class MainWindow(QMainWindow):
             return
         self._link_dot_state = state
         dot.setVisible(state is not None)
-        colour = C.GREEN if state else C.TEXT_DIM
+        # Green: JARVIS running on the phone. Grey: Link connected, JARVIS not. Dim: Link not reachable.
+        colour = {"jarvis": C.GREEN, "link": C.TEXT_MED}.get(state, C.TEXT_DIM)
         self._link_dot_lbl.setStyleSheet(f"color: {colour}; background: transparent;")
-        dot.setToolTip("JARVIS Link (phone): connected" if state else
-                       "JARVIS Link (phone): not connected — click for settings")
+        dot.setToolTip({
+            "jarvis": "JARVIS on the phone: running",
+            "link": "JARVIS Link connected · JARVIS on the phone: not running (or the phone can't reach this PC)",
+        }.get(state, "JARVIS Link (phone): not connected — click for settings"))
 
     def BuildRightPanel(self) -> QWidget:
         """The full conversation and the file drop, in a drawer that slides in
