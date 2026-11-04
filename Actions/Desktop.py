@@ -105,6 +105,23 @@ def _Unknown(said: str) -> str:
     )
 
 
+# Downloaded and converted wallpapers live here, not in temp: the desktop
+# points at the file, so deleting it turns the wallpaper black at next login.
+_WALL_DIR  = Path.home() / "Pictures" / "Orion Wallpapers"
+_WALL_KEEP = 10
+
+
+def _WallpaperFile(suffix: str) -> Path:
+    _WALL_DIR.mkdir(parents=True, exist_ok=True)
+    old = sorted(_WALL_DIR.glob("wallpaper_*"), key=lambda p: p.stat().st_mtime)
+    for p in old[:max(0, len(old) - (_WALL_KEEP - 1))]:
+        try:
+            p.unlink()
+        except Exception:
+            pass
+    return _WALL_DIR / f"wallpaper_{datetime.now():%Y%m%d_%H%M%S_%f}{suffix}"
+
+
 def ApplyWallpaper(image_path: str) -> str:
     path = Path(image_path).expanduser().resolve()
     if not path.exists():
@@ -118,7 +135,7 @@ def ApplyWallpaper(image_path: str) -> str:
             if path.suffix.lower() in {".webp", ".png"}:
                 try:
                     from PIL import Image
-                    bmp_path = Path(tempfile.mktemp(suffix=".bmp"))
+                    bmp_path = _WallpaperFile(".bmp")
                     Image.open(path).convert("RGB").save(bmp_path, "BMP")
                     path = bmp_path
                 except ImportError:
@@ -242,16 +259,14 @@ def SetWallpaperFromUrl(url: str) -> str:
         if not url.lower().startswith(("http://", "https://")):
             return Outcome.failed("set_wallpaper",
                                   "only http and https image links can be used", url=url)
-        tmp    = Path(tempfile.mktemp(suffix=suffix))
+        if suffix.lower() not in {".jpg", ".jpeg", ".png", ".bmp", ".webp"}:
+            suffix = ".jpg"
+        target = _WallpaperFile(suffix)
         # A deadline: urlretrieve could hang forever on a stalled server.
         with urllib.request.urlopen(url, timeout=30) as resp:
-            tmp.write_bytes(resp.read(50 * 1024 * 1024))
-        result = SetWallpaper(str(tmp))
-        try:
-            tmp.unlink()
-        except Exception:
-            pass
-        return result
+            target.write_bytes(resp.read(50 * 1024 * 1024))
+        # Kept: the wallpaper keeps pointing at this file.
+        return SetWallpaper(str(target))
     except Exception as e:
         return Outcome.failed("set_wallpaper",
                               f"the image could not be downloaded: {e}", url=url)

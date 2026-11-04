@@ -302,6 +302,7 @@ class PhoneTasks:
             return "failed", str(e)
         llm = Registry.build(LocalBrain.LLM_ID, LocalBrain.LlmConfig())
         decls = [d for d in LocalBrain.ShortTools(self.live.ToolDecls()) if d.get("name") not in NOT_FOR_PHONE]
+        offered = {d.get("name") for d in decls}
         tools = Schema.convert(decls, "openai")
         name = (getattr(self.live, "_asst_name", "") or "Orion").strip().title()
         creator = getattr(sys.modules.get(type(self.live).__module__), "CREATOR", "") or "its maker"
@@ -326,8 +327,12 @@ class PhoneTasks:
                 {"id": c.id, "type": "function", "function": {"name": c.name, "arguments": json.dumps(c.args)}}
                 for c in calls]})
             for c in calls:
-                fr = self._Execute(types.FunctionCall(id=c.id, name=c.name, args=dict(c.args)))
-                result = (fr.response or {}).get("result", "") if fr is not None else ""
+                if c.name in NOT_FOR_PHONE or c.name not in offered:
+                    # Only what was offered runs: a made-up (or slipped-in) shutdown / self-repair never does.
+                    result = "Not available for requests from the phone."
+                else:
+                    fr = self._Execute(types.FunctionCall(id=c.id, name=c.name, args=dict(c.args)))
+                    result = (fr.response or {}).get("result", "") if fr is not None else ""
                 messages.append({"role": "tool", "tool_call_id": c.id, "name": c.name, "content": str(result)})
         return "completed", "I did several steps but didn't finish. Ask again on the laptop to carry on."
 

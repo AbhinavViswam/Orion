@@ -141,6 +141,10 @@ class PipelineEngine:
             self.ReadConfig(config)
 
         self._history: list[dict] = []
+        # Notes sent with turn_complete=False: context, no reply asked for.
+        # Held until the next real user turn so they never land in the middle
+        # of a reply or between a tool call and its result.
+        self._notes: list = []
         self._queue: asyncio.Queue = asyncio.Queue()
         self._gen: Optional[asyncio.Task] = None
         self._closed = False
@@ -249,7 +253,11 @@ class PipelineEngine:
                           if self._history[i].get("role") == "user"), None)
         if last_user is not None and cut > last_user:
             cut = last_user
-        return self._history[cut:]
+        if cut:
+            # Never sent again (the budget only moves forward), so don't keep
+            # it either: old turns and their screenshots would pile up for ever.
+            del self._history[:cut]
+        return list(self._history)
 
     # ── the four methods Main.py calls ───────────────────────────────────────
     async def send_realtime_input(self, *, audio) -> None:
@@ -327,6 +335,10 @@ class PipelineEngine:
         content = self.ToContent(parts or [])
         if content in ("", []):
             return
+        if not turn_complete:
+            self._notes.append(content)
+            del self._notes[:-20]
+            return
 
         # NOT emitted as "what the user said" — see `heard_speech`.
         #
@@ -355,6 +367,9 @@ class PipelineEngine:
                 self._late_ids[call_id] = name
             self._awaiting = {}
             self._pending_sigs = {}
+        for note in self._notes:
+            self._history.append({"role": "user", "content": note})
+        self._notes = []
         self._history.append({"role": "user", "content": content})
         self._done_calls.clear()
         self._rounds = 0

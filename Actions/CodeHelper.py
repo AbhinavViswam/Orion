@@ -57,10 +57,32 @@ def ResolveSavePath(output_path: str, language: str) -> Path:
         "sql": ".sql", "json": ".json", "rust": ".rs", "go": ".go",
     }
     if output_path:
-        p = Path(output_path)
-        return p if p.is_absolute() else DESKTOP / p
+        p = Path(output_path).expanduser()
+        p = p if p.is_absolute() else DESKTOP / p
+        _CheckWritable(p)
+        return p
     ext = ext_map.get((language or "python").lower(), ".py")
     return DESKTOP / f"orion_code{ext}"
+
+
+def _CheckWritable(path: Path) -> None:
+    """Same rule as file_controller: inside home, never AppData / Startup /
+    dot-folders / the PowerShell profile. Raises ValueError otherwise."""
+    from Actions.FileController import IsSafePath
+    if not IsSafePath(path):
+        raise ValueError(f"I can't write code to {path} - only inside your own "
+                         f"folders, not system or app-data folders.")
+
+
+def _ConfirmRun(title: str, run) -> str:
+    """Running code the model chose waits for the user's on-screen confirm."""
+    from Brain import Confirm
+    if Confirm.PendingTitle():
+        return ("Not run: another confirmation is already waiting on screen - "
+                "the user has to answer that one first.")
+    return Confirm.request("code_run", title[:120],
+                           "Orion will run this code on your computer. Confirm only if you asked for it.",
+                           run)
 
 
 def _ReadFile(file_path: str) -> tuple[str, str]:
@@ -134,9 +156,15 @@ def _preview(code: str, lines: int = 10) -> str:
 
 
 def HasError(output: str) -> bool:
-    error_signals = ["error", "exception", "traceback", "syntaxerror",
-                     "nameerror", "typeerror", "stderr", "failed", "crash"]
-    return any(s in output.lower() for s in error_signals)
+    """Did the run fail? Judged by the exit code and a traceback, not by the
+    word "error" anywhere in the output ("0 failed" is a passing run)."""
+    low = output.lower()
+    if re.search(r"^exit code: (?!0\b)", output, re.MULTILINE | re.IGNORECASE):
+        return True
+    if "traceback (most recent call last)" in low:
+        return True
+    return low.startswith(("timed out", "interpreter not found",
+                           "execution error", "no interpreter"))
 
 
 def _TakeScreenshot() -> Path | None:
@@ -226,7 +254,9 @@ Code:"""
     response = model.generate_content(prompt)
     code     = CleanCode(response.text)
     path     = ResolveSavePath(output_path, lang)
-    _SaveFile(path, code)
+    status   = _SaveWithUndo(path, code, "wrote")
+    if not status.startswith("Saved"):
+        raise RuntimeError(status)
     return code, path
 
 
@@ -276,6 +306,8 @@ def RunFile(path: Path, args: list, timeout: int) -> str:
         parts  = []
         if output: parts.append(f"Output:\n{output}")
         if error:  parts.append(f"Stderr:\n{error}")
+        if result.returncode != 0:
+            parts.append(f"Exit code: {result.returncode}")
         return "\n\n".join(parts) if parts else "Executed with no output."
 
     except subprocess.TimeoutExpired:
@@ -303,6 +335,14 @@ def Build(description, language, output_path, args, timeout, speak=None, player=
         if speak: speak(msg)
         return msg
 
+    # Writing is undoable; running is not. The run-and-fix loop waits for the
+    # user's on-screen confirm, then speaks its result.
+    return _ConfirmRun(f"Run the code just built: {path.name}",
+                       lambda: _BuildLoop(code, path, description, args, timeout, speak, player)) + \
+        f"\n\nCode written to {path}.\nPreview:\n{_preview(code)}"
+
+
+def _BuildLoop(code, path, description, args, timeout, speak=None, player=None) -> str:
     last_output = ""
     for attempt in range(1, MAX_BUILD_ATTEMPTS + 1):
         print(f"[Code] 🔄 Attempt {attempt}/{MAX_BUILD_ATTEMPTS}")
@@ -385,6 +425,10 @@ Updated code:"""
 
     if not edited:
         return "The edit came back empty, so I left the file unchanged."
+    try:
+        _CheckWritable(Path(file_path))
+    except ValueError as e:
+        return str(e)
     status = _SaveWithUndo(Path(file_path), edited, "edited")
     print(f"[Code] ✅ Edited: {file_path}")
     return f"File edited. {status}\n\nPreview:\n{_preview(edited)}"
@@ -424,9 +468,14 @@ def RunAction(file_path, args, timeout, player) -> str:
     p = Path(file_path)
     if not p.exists():
         return f"File not found: {file_path}"
-    if player:
-        player.WriteLog(f"[Code] Running {p.name}...")
-    return RunFile(p, args, timeout)
+
+    def Go() -> str:
+        if player:
+            player.WriteLog(f"[Code] Running {p.name}...")
+        return RunFile(p, args, timeout)
+
+    shown_args = (" " + " ".join(args)) if args else ""
+    return _ConfirmRun(f"Run {p.name}{shown_args}", Go)
 
 
 _OPTIMIZE_LIMIT = 12000   # chars the model sees whole
@@ -475,10 +524,14 @@ Optimized code:"""
     if not optimized:
         return "The optimized code came back empty, so nothing was changed."
 
-    if file_path:
-        save_path = Path(file_path)
-    else:
-        save_path = ResolveSavePath(output_path, lang)
+    try:
+        if file_path:
+            save_path = Path(file_path)
+            _CheckWritable(save_path)
+        else:
+            save_path = ResolveSavePath(output_path, lang)
+    except ValueError as e:
+        return str(e)
 
     status = _SaveWithUndo(save_path, optimized, "optimized")
     print(f"[Code] ✅ Optimized: {save_path}")
@@ -571,7 +624,12 @@ Be specific and actionable. If you see an error message, quote it exactly."""
             code_match = re.search(r"```[a-zA-Z]*\n(.*?)```", analysis, re.DOTALL)
             if code_match:
                 fixed_code = code_match.group(1).strip()
-                if _LooksLikeWholeFile(fixed_code, file_content):
+                try:
+                    _CheckWritable(Path(file_path))
+                    writable = True
+                except ValueError:
+                    writable = False
+                if writable and _LooksLikeWholeFile(fixed_code, file_content):
                     status = _SaveWithUndo(Path(file_path), fixed_code, "screen-debug fixed")
                     analysis += f"\n\n✅ Fixed code: {status}"
                     print(f"[Code] ✅ Fixed code saved: {file_path}")

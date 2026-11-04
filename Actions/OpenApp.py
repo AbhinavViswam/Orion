@@ -103,6 +103,27 @@ def LaunchWindows(app_name: str) -> bool:
          without a command line for anything to be appended to.
       3. the Start Menu, typed like a person would.
     """
+    # A scheme, not a path: "ms-settings:", "spotify:", "steam://run/...".
+    # Known app schemes only: file:, search-ms:, ms-msdt: and friends open
+    # files or run tools, and an app NAME never needs them.
+    scheme, _, rest = app_name.partition(":")
+    if scheme and len(scheme) > 1 and ":" in app_name:
+        if scheme.lower() not in _APP_SCHEMES:
+            print(f"[open_app] refused scheme {scheme!r}")
+            return False
+        try:
+            os.startfile(app_name)               # noqa: S606 — no shell involved
+            return True
+        except Exception as exc:
+            print(f"[open_app] startfile failed for {app_name!r}: {exc}")
+        return DesktopSearch(app_name)
+
+    # An app name, never a path: which() returns any absolute .exe it is
+    # given, and the Start Menu runs a typed path too.
+    if _LooksLikePath(app_name):
+        print(f"[open_app] refused a path: {app_name!r}")
+        return False
+
     resolved = shutil.which(app_name)
     if resolved:
         try:
@@ -115,21 +136,27 @@ def LaunchWindows(app_name: str) -> bool:
         except Exception as exc:
             print(f"[open_app] Popen failed for {resolved!r}: {exc}")
 
-    # A scheme, not a path: "ms-settings:", "spotify:", "steam://run/...".
-    # Checked before ":" appears anywhere else — a Windows path has one too,
-    # at index 1, and that is a file, not a scheme.
-    scheme, _, rest = app_name.partition(":")
-    if rest and scheme and scheme.isalnum() and len(scheme) > 1:
-        try:
-            os.startfile(app_name)               # noqa: S606 — no shell involved
-            return True
-        except Exception as exc:
-            print(f"[open_app] startfile failed for {app_name!r}: {exc}")
-
     return DesktopSearch(app_name)
 
 
+# URI schemes that start an application and nothing else.
+_APP_SCHEMES = {
+    "ms-settings", "ms-windows-store", "ms-photos", "ms-clock", "ms-calculator",
+    "calculator", "ms-paint", "ms-screenclip", "ms-teams", "msteams", "xbox",
+    "spotify", "steam", "discord", "whatsapp", "tg", "slack", "zoommtg",
+    "com.epicgames.launcher", "outlookmail", "mailto", "skype", "notion",
+    "obsidian", "vscode", "figma",
+}
+
+
+def _LooksLikePath(name: str) -> bool:
+    return ("/" in name or "\\" in name or name.startswith(".")
+            or (len(name) > 1 and name[1] == ":"))
+
+
 def LaunchMacos(app_name: str) -> bool:
+    if _LooksLikePath(app_name):
+        return False
     for candidate in (app_name, f"{app_name}.app"):
         try:
             result = subprocess.run(
@@ -160,6 +187,8 @@ _LINUX_TERMINALS = [
 
 
 def LaunchLinux(app_name: str) -> bool:
+    if _LooksLikePath(app_name):
+        return False
     # "terminal" means whichever one this distribution actually ships.
     if app_name in ("x-terminal-emulator", "gnome-terminal", "terminal"):
         for term in _LINUX_TERMINALS:

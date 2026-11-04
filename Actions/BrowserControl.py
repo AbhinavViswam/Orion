@@ -13,6 +13,7 @@ import threading
 import webbrowser
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional
+from urllib.parse import quote_plus
 
 from Interface import AppIdentity
 from Brain import Outcome
@@ -460,6 +461,12 @@ def OpenNative(url: str, browser_name: Optional[str]) -> str:
     name = None
     if browser_name:
         name = _ALIASES.get(browser_name.lower().strip(), browser_name.lower().strip())
+        # Known browsers only. An unknown name used to be looked up in App Paths
+        # and launched with the URL as its argument — browser="powershell" turned
+        # an address into a command line. Anything else gets the default browser.
+        if name not in (_BROWSER_SPECS.get(_OS) or {}):
+            print(f"[Browser] '{name}' is not a known browser — using the default browser.")
+            name = None if url else DetectDefaultBrowser()
     elif not url:
         # No URL → only a window will open; needs the default browser's exe
         name = DetectDefaultBrowser()
@@ -551,6 +558,9 @@ class _BrowserSession:
         self._loop:    asyncio.AbstractEventLoop | None = None
         self._thread:  threading.Thread | None          = None
         self._ready    = threading.Event()
+        # Why the session could not start, when it could not. Set before
+        # _ready so start() never hands out a dead loop.
+        self.init_error: str = ""
 
         self._pw:      Playwright     | None = None
         self._context: BrowserContext | None = None
@@ -573,11 +583,21 @@ class _BrowserSession:
         self._ready.wait(timeout=20)
 
     def RunLoop(self):
-        self._loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(self._loop)
-        self._loop.run_until_complete(self.AsyncInit())
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            loop.run_until_complete(self.AsyncInit())
+        except Exception as e:
+            # A failed start used to leave a loop that never runs: every later
+            # action queued onto it and waited the full 60 s timeout.
+            self.init_error = str(e) or type(e).__name__
+            self._ready.set()
+            loop.close()
+            return
+        self._loop = loop
         self._ready.set()
-        self._loop.run_forever()
+        loop.run_forever()
+        loop.close()
 
     async def AsyncInit(self):
         # The one door into a live session: nothing in this class reaches
@@ -593,8 +613,15 @@ class _BrowserSession:
         return future.result(timeout=timeout)
 
     def close(self):
-        if self._loop:
-            asyncio.run_coroutine_threadsafe(self.AsyncClose(), self._loop).result(10)
+        loop = self._loop
+        if not loop:
+            return
+        try:
+            asyncio.run_coroutine_threadsafe(self.AsyncClose(), loop).result(10)
+        finally:
+            # Stop the loop too, or its thread lives on after every close.
+            self._loop = None
+            loop.call_soon_threadsafe(loop.stop)
 
     async def AsyncClose(self):
         if self._context:
@@ -819,7 +846,7 @@ class _BrowserSession:
 
     async def search(self, query: str, engine: str = "google") -> str:
         base = _SEARCH_ENGINES.get(engine.lower(), _SEARCH_ENGINES["google"])
-        return await self.GoTo(base + query.replace(" ", "+"))
+        return await self.GoTo(base + quote_plus(query))
 
     async def click(self, selector: str = None, text: str = None) -> str:
         page = await self._get_page()
@@ -875,7 +902,9 @@ class _BrowserSession:
         page = await self._get_page()
         try:
             text = await page.inner_text("body")
-            return text[:4_000]
+            # The page is someone else's writing, read through the user's
+            # signed-in profile: data, never instructions.
+            return Outcome.Untrusted("web", text[:4_000])
         except Exception as e:
             return f"Could not get page text: {e}"
 
@@ -964,7 +993,10 @@ class _BrowserSession:
     async def screenshot(self, path: str = None) -> str:
         page = await self._get_page()
         try:
-            save_path = path or str(Path.home() / "Desktop" / "orion_screenshot.png")
+            # Same rule as computer_control's screenshot: inside the home
+            # folder or the Desktop default, never a model-chosen system path.
+            from Actions.ComputerControl import SafeScreenshotPath
+            save_path = str(SafeScreenshotPath(path))
             await page.screenshot(path=save_path, full_page=False)
             return f"Screenshot saved: {save_path}"
         except Exception as e:
@@ -1028,6 +1060,10 @@ class _SessionRegistry:
             if browser_name not in self._sessions:
                 sess = _BrowserSession(browser_name)
                 sess.start()
+                if not sess._loop:
+                    # Not cached: the next call gets a fresh try, not a dead session.
+                    raise RuntimeError(sess.init_error or
+                                       f"{browser_name} did not start in time")
                 self._sessions[browser_name] = sess
                 print(f"[Registry] New session: {browser_name}")
             return self._sessions[browser_name]
@@ -1142,7 +1178,7 @@ def BrowserControl(
         if action == "search":
             base    = _SEARCH_ENGINES.get(params.get("engine", "google").lower(),
                                           _SEARCH_ENGINES["google"])
-            nav_url = base + params.get("query", "").replace(" ", "+")
+            nav_url = base + quote_plus(params.get("query", ""))
         else:
             nav_url = params.get("url", "").strip()
 

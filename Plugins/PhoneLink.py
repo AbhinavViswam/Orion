@@ -90,6 +90,15 @@ def run(parameters: dict, player=None, session_memory=None) -> str:
     action = str((parameters or {}).get("action") or "status").lower().strip()
     p = parameters or {}
     if action == "send":
+        fp = str(p.get("file_path") or "").strip()
+        if fp:
+            # Same rule as file_controller: the user's own folders only, never
+            # AppData, dot-folders (.ssh keys) or anything outside home.
+            from pathlib import Path
+            from Actions.FileController import IsSafePath
+            if not IsSafePath(Path(fp).expanduser()):
+                return (f"I can only send files from your own folders (Desktop, Documents, "
+                        f"Downloads...), not {fp}. Nothing was sent.")
         return PhoneBridge.SendToPhone(str(p.get("title") or ""), str(p.get("text") or ""),
                                        str(p.get("url") or ""), str(p.get("file_path") or ""))
     if action == "activity":

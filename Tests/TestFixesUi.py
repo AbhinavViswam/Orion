@@ -170,9 +170,18 @@ class TestClipboardHelpSetting(_WindowBase):
             self.assertFalse(self._Copy("hunter2-my-secret-password"))
 
     def TestOnShowsThePanel(self):
-        with mock.patch("Brain.Settings.GetClipboardHelpEnabled", lambda: True):
+        # Qt's own copy (this test's) reads as tagged private on Windows; a copy from another app doesn't.
+        with mock.patch("Brain.Settings.GetClipboardHelpEnabled", lambda: True), \
+                mock.patch("System.ClipboardWatch._Private", lambda: False), \
+                mock.patch("System.ClipboardWatch._FromOrion", lambda: False):
             self.assertTrue(self._Copy("Traceback (most recent call last): boom"))
         self.w._clipboard_panel.hide()
+
+    def TestPasswordManagerCopyShowsNoPanel(self):
+        with mock.patch("Brain.Settings.GetClipboardHelpEnabled", lambda: True), \
+                mock.patch("System.ClipboardWatch._Private", lambda: True), \
+                mock.patch("System.ClipboardWatch._FromOrion", lambda: False):
+            self.assertFalse(self._Copy("Traceback (most recent call last): boom"))
 
 
 # ── M5 ──────────────────────────────────────────────────────────────────────

@@ -4,7 +4,8 @@ Orion ⇄ JARVIS Link: how Orion reaches the user's phone.
 JARVIS Link (jarvis-link/jarvis_link.py) runs on this same PC and already talks to JARVIS on the phone. Orion pairs
 with Link once: Link shows a 6-digit code (Connect Orion…), the user types it into Settings › Plugins › JARVIS Link
 (phone), and both sides make a key from a fresh X25519 exchange plus the code. After that every frame is sealed
-with that key (AES-256-GCM), the same way the phone's are. The key is kept in Config/PhoneLink.json (git-ignored).
+with that key (AES-256-GCM), the same way the phone's are. The key is kept in Config/PhoneLink.json (git-ignored),
+encrypted with Windows' own encryption for this user (DPAPI, System/Secrets.py).
 
 What goes through it now (Phase 1): Orion's card (running / muted / speaking), alerts for the phone (reminders,
 call messages, monitor and system alerts) and Orion's long jobs ("Orion is working on the dev agent"). Link hands
@@ -27,6 +28,7 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from Brain.Settings import CONFIG_DIR
+from System import Secrets
 
 LINK_HOST = "127.0.0.1"
 LINK_PORT = 47800
@@ -37,6 +39,8 @@ CARD_EVERY_S = 300             # the card is sent again this often, and at once 
 STATUS_EVERY_S = 30            # Link's status (is JARVIS running on the phone?) is asked this often
 MAX_FRAME = 8 * 1024 * 1024    # a reply bigger than this isn't Link's
 GARBLED_MAX = 3                # replies in a row that won't open before the pairing is treated as gone
+# Confirmations answered only at the laptop: what they approve (new code) is shown only there.
+LAPTOP_ONLY = {"skill_forge", "self_repair", "self_repair_rollback"}
 CAN = ["web_search", "browser", "flights", "dev_agent", "files", "screen", "call_secretary", "reminders"]
 
 _lock = threading.Lock()
@@ -59,9 +63,29 @@ class Garbled(LinkDown):
 def Load() -> Optional[dict]:
     try:
         d = json.loads(STORE.read_text("utf-8"))
-        return d if isinstance(d, dict) and d.get("key") and d.get("link_id") else None
+        if not (isinstance(d, dict) and d.get("key") and d.get("link_id")):
+            return None
     except Exception:
         return None
+    if ":" not in str(d["key"]):
+        # Saved before the key was encrypted (plain base64): encrypt it now, so the user stays paired.
+        try:
+            Save(d)
+        except Exception:
+            pass
+    return d
+
+
+def _KeyOf(d: dict) -> bytes:
+    """The AES key from a saved pairing: "dpapi:…" (or "plain:…"), or plain base64 from before they were encrypted."""
+    stored = str(d["key"])
+    if ":" not in stored:
+        return base64.b64decode(stored)
+    key = Secrets.Unprotect(stored)
+    if key is None:
+        # The DPAPI key is gone (another Windows user or PC): this pairing can't be used here.
+        raise NotPaired()
+    return key
 
 
 def Save(d: Optional[dict]) -> None:
@@ -71,6 +95,8 @@ def Save(d: Optional[dict]) -> None:
         else:
             STORE.parent.mkdir(parents=True, exist_ok=True)
             tmp = STORE.with_suffix(".tmp")
+            if ":" not in str(d.get("key") or ":"):
+                d = {**d, "key": Secrets.Protect(base64.b64decode(d["key"]), "Orion JARVIS Link key")}
             tmp.write_text(json.dumps(d, indent=2), "utf-8")
             tmp.replace(STORE)
 
@@ -188,7 +214,7 @@ def Sealed(op: str, timeout: float = 8, **fields) -> dict:
     d = Load()
     if not d:
         raise NotPaired()
-    key = base64.b64decode(d["key"])
+    key = _KeyOf(d)
     box = _Seal(key, {"op": op, "ts": int(time.time() * 1000), **fields}, b"orion:" + d["link_id"].encode())
     r = _Call({"t": "orion", "box": box}, timeout)
     if "box" not in r:
@@ -305,6 +331,11 @@ class Bridge:
                     fails = 0
                 r = Sealed("wait", timeout=WAIT_S + 15, wait_s=WAIT_S)
                 garbled = 0
+                if r.get("ok") is False:
+                    # Link answered at once without waiting (it refused the wait): don't ask again in a tight loop.
+                    self._wake.wait(BACKOFF_S[0])
+                    self._wake.clear()
+                    continue
                 for task in (r.get("data") or {}).get("tasks", []):
                     self.OnTask(task)
             except Garbled as e:
@@ -401,6 +432,8 @@ class Bridge:
         self._MirrorHide()             # an older question still on the phone is taken down first
         if self.no_mirror:
             return
+        if self._PendingKey() in LAPTOP_ONLY:
+            return                     # its code is in the laptop's panel: a yes must come from someone who saw it
         busy = getattr(self.tasks, "running", 0) > 0
         if not self.connected or not (busy or IdleSeconds() >= AWAY_S):
             return
@@ -433,6 +466,13 @@ class Bridge:
             gate.resolve(bool(task.get("yes")))
         else:
             gate.resolve(bool(task.get("yes")), pid=pid)
+
+    def _PendingKey(self) -> str:
+        fn = getattr(self._gate, "PendingDetail", None)
+        try:
+            return str(fn()[0]) if fn is not None else ""
+        except Exception:
+            return ""
 
     def _PendingId(self) -> Optional[int]:
         """The gate's waiting confirmation id (0: none); None when the gate has no ids."""

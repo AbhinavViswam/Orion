@@ -1,4 +1,5 @@
 import json
+import re
 import subprocess
 import sys
 import threading
@@ -50,10 +51,20 @@ def PasteText(text: str) -> None:
     paste_hotkey = ("command", "v") if os_name == "mac" else ("ctrl", "v")
 
     if _PYPERCLIP:
+        try:
+            saved = pyperclip.paste()
+        except Exception:
+            saved = None
         pyperclip.copy(text)
         time.sleep(0.15)
         pyautogui.hotkey(*paste_hotkey)
         time.sleep(0.1)
+        if saved is not None:        # give the user's clipboard back
+            time.sleep(0.2)
+            try:
+                pyperclip.copy(saved)
+            except Exception:
+                pass
     else:
         pyautogui.write(text, interval=0.03)
 
@@ -178,52 +189,15 @@ def DesktopSend(app_name: str, receiver: str, message: str) -> str:
     )
 
 def SendWhatsapp(receiver: str, message: str) -> str:
-    """WhatsApp goes through the verified driver when there is one.
+    """WhatsApp is typed blind, like the other desktop apps.
 
-    _desktop_send below is a sequence of keystrokes with sleeps between them:
-    it presses Win, types the app name, presses Ctrl+F, types the contact,
-    presses Enter twice and reports success — without ever reading back which
-    window received any of that. When the machine is a second slower than the
-    sleeps assume, the whole sequence lands somewhere else and the user is
-    still told the message was sent.
-
-    plugins/_whatsapp_core.py already drives WhatsApp properly for the calling
-    plugins: it finds the real window, opens the conversation, checks the
-    conversation is the right person's, types, and confirms the box emptied
-    before it says "sent". Using it here costs nothing and removes the one
-    failure that matters — a message reported as delivered that never left.
-
-    The blind path stays as the fallback for a machine where the driver cannot
-    run at all (the plugin file removed, a missing dependency, no WhatsApp).
-    But once the driver HAS run, its answer stands: falling back after it
-    refused to send is how a message ends up typed into the wrong
-    conversation, which is worse than not sending it.
+    This used to try `Plugins._whatsapp_core`, a verified driver that never
+    existed in this project, so every send already fell through to the blind
+    path below. The dead branch is gone; the send itself now waits for the
+    on-screen confirm in SendMessage(), because blind keystrokes can land in
+    the wrong window or conversation.
     """
-    try:
-        from Plugins import _whatsapp_core as wa
-    except Exception as e:
-        print(f"[SendMessage] WhatsApp driver unavailable ({e}) — typing blind.")
-        return DesktopSend("WhatsApp", receiver, message)
-
-    try:
-        transport, why = wa.get()
-    except Exception as e:
-        print(f"[SendMessage] WhatsApp driver failed to start ({e}) — typing blind.")
-        return DesktopSend("WhatsApp", receiver, message)
-
-    if transport is None:
-        print(f"[SendMessage] {why} — typing blind.")
-        return DesktopSend("WhatsApp", receiver, message)
-
-    sent, failure = transport.send_message_to(receiver, message)
-    if sent:
-        # The one platform that can say `done`: the driver opened the
-        # conversation, proved it was the right person's, typed, and confirmed
-        # the box emptied.
-        return Outcome.done("send_message", platform="WhatsApp",
-                            to=receiver, verified=True)
-    return Outcome.failed("send_message", failure,
-                          platform="WhatsApp", to=receiver)
+    return DesktopSend("WhatsApp", receiver, message)
 
 def SendTelegram(receiver: str, message: str) -> str:
     return DesktopSend("Telegram", receiver, message)
@@ -308,9 +282,11 @@ _PLATFORM_MAP = [
 
 
 def ResolvePlatform(platform_str: str):
+    # Whole words only: a substring test sent "signal" through Instagram ("ig").
     key = platform_str.lower().strip()
+    words = set(re.split(r"[^a-z0-9]+", key)) - {""}
     for keywords, handler in _PLATFORM_MAP:
-        if any(k in key for k in keywords):
+        if key in keywords or words & keywords:
             return handler
     return lambda r, m: DesktopSend(platform_str.strip().title(), r, m)
 
@@ -344,17 +320,32 @@ def SendMessage(
     if player:
         player.WriteLog(f"[msg] {platform} → {receiver}")   # the message itself IS the news
 
-    threading.Thread(
-        target=SendAndReport,
-        args=(player, platform, receiver, message_text),
-        daemon=True, name="send-message",
-    ).start()
+    # Every path here types blind: nothing reads back which window or
+    # conversation got the keystrokes, and a message cannot be unsent. So it
+    # waits for the user's on-screen confirm, then sends in the background and
+    # reports, as before.
+    from Brain import Confirm
+    if Confirm.PendingTitle():
+        return Outcome.ask(
+            "send_message",
+            "there is already a confirmation waiting on screen - the user has "
+            "to answer that one first", to=receiver, platform=platform)
 
-    # Sending opens an application, searches for a person and types — several
-    # seconds during which the old code held the whole conversation still. The
-    # answer goes out now and the result follows, which is the shape
-    # whatsapp_call.py settled on for the same reason.
-    return Outcome.started("send_message", platform=platform, to=receiver)
+    def Go() -> str:
+        threading.Thread(
+            target=SendAndReport,
+            args=(player, platform, receiver, message_text),
+            daemon=True, name="send-message",
+        ).start()
+        return f"Sending to {receiver} on {platform}."
+
+    return Confirm.request(
+        "send_message",
+        f"Send {platform} message to {receiver}: {preview}"[:120],
+        "Orion will type this message into the app without being able to "
+        "check which conversation gets it.",
+        Go,
+    )
 
 
 def SendAndReport(player, platform: str, receiver: str,
@@ -413,7 +404,8 @@ TOOL = {
         "Sends a text message via WhatsApp, Telegram, or another messaging "
         "platform. Write 'message_text' in the USER'S OWN LANGUAGE, exactly "
         "what they asked to be said. "
-        "This tool answers immediately and sends in the background. On "
+        "It first puts a confirmation on screen; nothing is sent until the "
+        "user confirms. Then it sends in the background. On "
         "status=started say only that you are sending it, never that it is "
         "sent. The result follows separately: status=done means it was "
         "confirmed delivered to the conversation, status=unverified means the "

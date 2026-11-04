@@ -184,8 +184,28 @@ class TestCodeHelper(_TempConfig):
     def setUp(self):
         super().setUp()
         from Actions import CodeHelper
+        from Actions import FileController
         self.CH = CodeHelper
         self.file = self.tmp / "app.py"
+        # The temp folder lives in AppData, which the real path rule refuses.
+        p = mock.patch.object(FileController, "IsSensitivePath", lambda _p: False)
+        p.start()
+        self.addCleanup(p.stop)
+
+    def TestRunAndBuildWaitForConfirm(self):
+        self.file.write_text("print(1)", encoding="utf-8")
+        asked = []
+        with mock.patch.object(Confirm, "request", lambda key, title, detail, run: asked.append(run) or "PENDING"), \
+                mock.patch.object(Confirm, "PendingTitle", lambda: ""), \
+                mock.patch.object(self.CH, "RunFile", lambda *a: "Output:\n1"):
+            self.assertEqual(self.CH.RunAction(str(self.file), [], 5, None), "PENDING")
+            self.assertEqual(asked[0](), "Output:\n1")      # runs only once confirmed
+
+    def TestHasErrorReadsTheExitCode(self):
+        self.assertFalse(self.CH.HasError("Output:\n3 passed, 0 failed, 0 errors"))
+        self.assertTrue(self.CH.HasError("Stderr:\nboom\n\nExit code: 1"))
+        self.assertTrue(self.CH.HasError("Traceback (most recent call last):\n  x"))
+        self.assertTrue(self.CH.HasError("Timed out after 30s."))
 
     def TestOptimizeRefusesABigFile(self):
         big = "x = 1\n" * 2500                                        # 15,000 chars
@@ -831,6 +851,22 @@ class TestPipeline(unittest.TestCase):
         msgs = eng.Messages()
         self.assertEqual(msgs[-1]["content"], big)
         self.assertEqual(msgs[0]["role"], "system")
+        self.assertEqual(len(eng._history), 1)          # what is never sent again isn't kept
+
+    def TestANoteAsksForNoReply(self):
+        from Engines.EnginePipeline import PipelineEngine
+        eng = PipelineEngine(SimpleNamespace(caps={}), config=_Cfg())
+        started = []
+        eng.QueueGeneration = lambda: started.append(1)
+
+        async def Go():
+            await eng.send_client_content(turns={"role": "user", "parts": [{"text": "JARVIS said hi"}]},
+                                          turn_complete=False)
+            self.assertEqual((started, eng._history), ([], []))
+            await eng.send_client_content(turns={"role": "user", "parts": [{"text": "hello"}]})
+        asyncio.run(Go())
+        self.assertEqual(started, [1])
+        self.assertEqual([h["content"] for h in eng._history], ["JARVIS said hi", "hello"])
 
 
 # ── H18: call secretary ──────────────────────────────────────────────────────
@@ -973,6 +1009,33 @@ class TestFilePaths(unittest.TestCase):
         self.addCleanup(shutil.rmtree, self.tmp, True)
         Undo.clear()
         self.addCleanup(Undo.clear)
+        from Actions import FileController
+        self.real_sensitive = FileController.IsSensitivePath
+        # The temp folder lives in AppData, which the real path rule refuses.
+        p = mock.patch.object(FileController, "IsSensitivePath", lambda _p: False)
+        p.start()
+        self.addCleanup(p.stop)
+
+    def TestSensitiveFoldersAreRefused(self):
+        from Actions import FileController as F
+        home = Path.home()
+        with mock.patch.object(F, "IsSensitivePath", self.real_sensitive):
+            for bad in (home / ".ssh" / "id_rsa", home / "AppData" / "Roaming" / "x.txt",
+                        home / "Documents" / "WindowsPowerShell" / "profile.ps1"):
+                self.assertFalse(F.IsSafePath(bad), bad)
+            self.assertTrue(F.IsSafePath(home / "Desktop" / "notes.txt"))
+
+    def TestRunnableFilesWaitForConfirm(self):
+        from Actions import FileController as F
+        asked = []
+        with mock.patch.object(Confirm, "request", lambda key, title, detail, run: asked.append(key) or "PENDING"), \
+                mock.patch.object(Confirm, "PendingTitle", lambda: ""):
+            said = F.file_controller({"action": "write", "path": str(self.tmp), "name": "a.bat",
+                                      "content": "shutdown /s"})
+        self.assertEqual(said, "PENDING")
+        self.assertFalse((self.tmp / "a.bat").exists())
+        self.assertIn("Written", F.file_controller({"action": "write", "path": str(self.tmp),
+                                                     "name": "a.txt", "content": "hi"}))
 
     def TestRenameStaysInItsFolder(self):
         from Actions import FileController as F
@@ -1154,10 +1217,25 @@ class TestSmallFixes(unittest.TestCase):
         script = self.tmp / "s.py"
         script.write_text("print(1)", encoding="utf-8")
         runs = []
+        # Running waits for the on-screen confirm; once confirmed it uses our Python.
         with mock.patch.object(FP.subprocess, "run",
-                               lambda cmd, **k: runs.append(cmd) or SimpleNamespace(stdout="1", stderr="")):
+                               lambda cmd, **k: runs.append(cmd) or SimpleNamespace(stdout="1", stderr="")), \
+                mock.patch.object(Confirm, "request", lambda key, title, detail, run: run()), \
+                mock.patch.object(Confirm, "PendingTitle", lambda: ""):
             FP.ProcessCode(script, "run", {})
         self.assertEqual(runs[0][0], sys.executable)
+
+    def TestSendMessagePlatformsMatchWholeWords(self):
+        from Actions import SendMessage as SM
+        self.assertIs(SM.ResolvePlatform("Signal"), SM.SendSignal)
+        self.assertIs(SM.ResolvePlatform("ig"), SM.SendInstagram)
+        self.assertIs(SM.ResolvePlatform("WhatsApp Desktop"), SM.SendWhatsapp)
+
+    def TestFlightUrlHasNoFixedRoute(self):
+        from Actions import FlightFinder as FF
+        url = FF.BuildGoogleFlightsUrl("New York", "Tokyo & Osaka", "2026-12-01")
+        self.assertNotIn("tfs=", url)
+        self.assertIn("Tokyo+%26+Osaka", url)
 
     def TestWifiSaysItNeedsAdmin(self):
         from Actions import ComputerSettings as CS

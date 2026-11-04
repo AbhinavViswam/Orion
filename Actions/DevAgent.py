@@ -305,16 +305,20 @@ def InstallDependencies(dependencies: list[str], project_dir: Path) -> str:
         return f"Install error (non-fatal): {e}"
 
 def OpenVscode(project_dir: Path) -> bool:
+    import shutil
     vscode_candidates = [
-        "code",
-        rf"C:\Users\{Path.home().name}\AppData\Local\Programs\Microsoft VS Code\bin\code.cmd",
+        shutil.which("code"),
+        str(Path.home() / "AppData" / "Local" / "Programs" / "Microsoft VS Code" / "bin" / "code.cmd"),
         r"C:\Program Files\Microsoft VS Code\bin\code.cmd",
     ]
     for cmd in vscode_candidates:
+        # Only a launcher that is really there: with shell=True a missing
+        # "code" still "started" (cmd.exe did), so the fallbacks never ran.
+        if not cmd or not Path(cmd).is_file():
+            continue
         try:
             subprocess.Popen(
                 [cmd, str(project_dir)],
-                shell=True,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL
             )
@@ -324,6 +328,19 @@ def OpenVscode(project_dir: Path) -> bool:
         except Exception:
             continue
     return False
+
+# What a planned project may be started with. The plan comes from a model, so
+# its run_command is not allowed to name any program on the machine.
+_RUNNERS = {"python", "python3", "py", "node", "ts-node", "deno", "bun",
+            "go", "cargo", "java", "dotnet", "ruby", "php"}
+
+
+def SafeRunCommand(run_command: str, entry_point: str) -> str:
+    parts = str(run_command or "").split()
+    if parts and Path(parts[0]).name.lower().removesuffix(".exe") in _RUNNERS:
+        return run_command
+    return f"python {entry_point}"
+
 
 def RunProject(run_command: str, project_dir: Path, timeout: int = 30) -> str:
     print(f"[DevAgent] 🚀 Running: {run_command}")
@@ -507,7 +524,7 @@ def BuildProject(
 
     files        = plan.get("files", [])
     entry_point  = plan.get("entry_point", "main.py")
-    run_command  = plan.get("run_command", f"python {entry_point}")
+    run_command  = SafeRunCommand(plan.get("run_command", ""), entry_point)
     dependencies = plan.get("dependencies", [])
 
     log(f"Project: {proj_name} | Files: {len(files)} | Entry: {entry_point}")
@@ -553,11 +570,30 @@ def BuildProject(
         if speak: speak(msg)
         return msg
 
+    OpenVscode(project_dir)
+
+    # Writing files is harmless; installing packages and running the code is
+    # not. Both wait for the user's on-screen confirm, then the result is spoken.
+    from Brain import Confirm
+    if Confirm.PendingTitle():
+        return (f"Project files written to {project_dir}. I did not install or run it: "
+                f"another confirmation is already waiting on screen.")
+    deps_note = f" + install {', '.join(map(str, dependencies))}" if dependencies else ""
+    return Confirm.request(
+        "dev_agent_run",
+        f"Run project {proj_name}: {run_command}{deps_note}"[:120],
+        "Orion will install the project's packages into its own venv and run it. "
+        "Confirm only if you asked for this project.",
+        lambda: _RunAndFix(description, language, proj_name, project_dir, files, file_codes,
+                           entry_point, run_command, dependencies, timeout, speak, log),
+    ) + f"\n\nProject files written to {project_dir}."
+
+
+def _RunAndFix(description, language, proj_name, project_dir, files, file_codes,
+               entry_point, run_command, dependencies, timeout, speak, log) -> str:
     if dependencies:
         install_result = InstallDependencies(dependencies, project_dir)
         log(install_result)
-
-    OpenVscode(project_dir)
 
     last_output   = ""
     auto_installs = 0  

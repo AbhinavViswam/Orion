@@ -670,6 +670,11 @@ class HudCanvas(QWidget):
         if visible and (new_frame or _blinked or self._paint_tick == 0):
             self.update()
 
+        # Hidden in the tray, nothing shows these frames: tick five times a second, not 125.
+        want = 8 if (visible or self.float_on) else 200
+        if self._tmr.interval() != want:
+            self._tmr.setInterval(want)
+
     def OnScreen(self) -> bool:
         """True only when this canvas can actually be seen by the user."""
         try:
@@ -5167,13 +5172,17 @@ class MainWindow(QMainWindow):
         import tempfile
         fd, tmp = tempfile.mkstemp(suffix=".vbs")
         try:
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
+            # UTF-16 with a BOM: wscript reads anything else in the ANSI code page, which breaks a
+            # path with non-English letters in it (a user name, a OneDrive desktop).
+            with os.fdopen(fd, "w", encoding="utf-16") as f:
                 f.write(vbs)
             proc = subprocess.Popen(
                 ["wscript.exe", "/nologo", tmp],
                 creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NO_WINDOW,
             )
-            proc.wait(timeout=10)
+            code = proc.wait(timeout=10)
+            if code != 0 or not Path(lnk).exists():
+                raise OSError(f"Windows Script Host couldn't make the shortcut (exit code {code})")
         finally:
             try:
                 os.unlink(tmp)
@@ -6566,12 +6575,20 @@ class MainWindow(QMainWindow):
         self._phone_remote.show()
 
     def OpenSettings(self, section: str = "") -> None:
+        # Floating or in the tray, the open overlay isn't "visible" (its window is hidden): bring the window up
+        # first, and reuse what is open rather than stacking a second Settings over it.
+        self.NeedWindow()
         old = getattr(self, "_settings_overlay", None)
-        if old is not None and old.isVisible():
-            if section:
-                old.Show(section)
-            old.raise_()
-            return
+        try:
+            if old is not None and not old._closing:
+                if not old.isHidden():
+                    if section:
+                        old.Show(section)
+                    old.raise_()
+                    return
+                old.close()
+        except RuntimeError:
+            pass
         sections = [
             ("general", "◎", "General", self.BuildGeneralPage),
             ("brain", "✦", "Brain", self.BuildBrainPage),
@@ -6944,6 +6961,15 @@ class MainWindow(QMainWindow):
     def ShowConfirmBanner(self, title: str, detail: str):
         self.HideConfirmBanner()
         ov = ConfirmBanner(title, detail, parent=self.centralWidget())
+        # Which confirmation this banner shows: CONFIRM answers only that one, never a newer one that replaced it
+        # before its own banner came up. 0: none matches (a stale banner), so the click answers nothing.
+        ov.pid = 0
+        try:
+            from Brain.Confirm import PendingId, PendingTitle
+            if str(PendingTitle())[:120] == title:
+                ov.pid = PendingId()
+        except Exception:
+            ov.pid = None
         ov.answered.connect(self.OnConfirmAnswered)
         self.CentreOverlay(ov)
         self._confirm_overlay = ov
@@ -6959,10 +6985,12 @@ class MainWindow(QMainWindow):
         # Tear the banner down first: core.confirm.resolve() may be about to
         # shut the machine down, and a live widget mid-callback is not where you
         # want to be when that happens.
+        ov = getattr(self, "_confirm_overlay", None)
+        pid = getattr(ov, "pid", None) if ov is not None else None
         self.HideConfirmBanner()
         try:
             from Brain.Confirm import resolve
-            resolve(bool(accepted))
+            resolve(bool(accepted), pid=pid)
         except Exception as e:
             self._log.AppendLog(f"ERR: Confirmation failed — {e}")
 
@@ -6973,6 +7001,10 @@ class MainWindow(QMainWindow):
             # ⚙ "Clipboard help" off: never preview copies (they can be passwords)
             from Brain.Settings import GetClipboardHelpEnabled
             if not GetClipboardHelpEnabled():
+                return
+            # A password manager's copy (it tags it so) and Orion's own copies are never shown or offered.
+            from System import ClipboardWatch
+            if ClipboardWatch._Private() or ClipboardWatch._FromOrion():
                 return
             text = QApplication.clipboard().text().strip()
             if len(text) >= 10:

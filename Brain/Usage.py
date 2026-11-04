@@ -10,6 +10,7 @@ never slow a reply or break one, so every write is guarded and quick.
 """
 from __future__ import annotations
 
+import atexit
 import json
 import threading
 import time
@@ -21,9 +22,13 @@ USAGE_PATH = Path(__file__).resolve().parent / "Usage.json"
 KEEP_DAYS = 60          # older days and tool calls are dropped
 MAX_CALLS = 5000        # tool calls kept at most
 
+SAVE_DELAY = 5.0        # seconds: writes are batched, not one per reply
+
 _lock = threading.Lock()
 _session_tokens = 0
 _cache: dict | None = None
+_save_timer: threading.Timer | None = None
+_dirty_path: Path | None = None     # where the pending write goes
 
 
 def _Empty() -> dict:
@@ -47,14 +52,37 @@ def _Load() -> dict:
 
 
 def _Save(data: dict) -> None:
+    """Called under _lock. The file is rewritten a few seconds later, off the
+    caller's thread — recording happens on the event loop, once per reply."""
+    global _save_timer, _dirty_path
+    _dirty_path = USAGE_PATH
+    if _save_timer is None:
+        _save_timer = threading.Timer(SAVE_DELAY, Flush)
+        _save_timer.daemon = True
+        _save_timer.start()
+
+
+def Flush() -> None:
+    """Write any pending change now (timer, exit, Reset)."""
+    global _save_timer, _dirty_path
+    with _lock:
+        if _save_timer is not None:
+            _save_timer.cancel()
+            _save_timer = None
+        path, _dirty_path = _dirty_path, None
+        if path is not None and _cache is not None:
+            _Write(_cache, path)
+
+
+def _Write(data: dict, path: Path) -> None:
     try:
         cutoff = (date.today() - timedelta(days=KEEP_DAYS)).isoformat()
         data["days"] = {d: v for d, v in data["days"].items() if d >= cutoff}
         since = time.time() - KEEP_DAYS * 86400
         data["tools"] = [c for c in data["tools"] if c[0] >= since][-MAX_CALLS:]
-        tmp = USAGE_PATH.with_suffix(".tmp")
+        tmp = path.with_suffix(".tmp")
         tmp.write_text(json.dumps(data, separators=(",", ":")), encoding="utf-8")
-        tmp.replace(USAGE_PATH)
+        tmp.replace(path)
     except Exception as e:
         print(f"[Usage] could not save: {e}")
 
@@ -62,6 +90,7 @@ def _Save(data: dict) -> None:
 def Reset() -> None:
     """Forget the in-memory copy (tests point USAGE_PATH somewhere else)."""
     global _cache, _session_tokens
+    Flush()
     with _lock:
         _cache = None
         _session_tokens = 0
@@ -150,3 +179,6 @@ def ToolStats(days: int = 7) -> list[dict]:
         s["avg_ms"] = int(s.pop("ms") / s["calls"])
         out.append(s)
     return sorted(out, key=lambda s: (-s["calls"], s["name"]))
+
+
+atexit.register(Flush)     # nothing recorded is lost on a normal exit

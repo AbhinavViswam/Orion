@@ -251,10 +251,7 @@ def _SmartType(text: str, clear_first: bool = True) -> str:
         time.sleep(0.1)
 
     if len(text) > 20 and RequirePyperclip():
-        pyperclip.copy(text)
-        time.sleep(0.1)
-        paste_key = "command" if _GetOs() == "mac" else "ctrl"
-        pyautogui.hotkey(paste_key, "v")
+        _PasteKeepingClipboard(text)
         return f"Smart-typed (clipboard): {text[:60]}{'…' if len(text) > 60 else ''}"
 
     how = _TypeText(text, 0.04)
@@ -303,9 +300,28 @@ def _drag(x1: int, y1: int, x2: int, y2: int, duration: float = 0.5) -> str:
     return f"Dragged ({x1},{y1}) → ({x2},{y2})"
 
 
+def _PasteKeepingClipboard(text: str) -> None:
+    """Paste `text` through the clipboard, then put back what the user had there."""
+    try:
+        saved = pyperclip.paste()
+    except Exception:
+        saved = None
+    pyperclip.copy(text)
+    time.sleep(0.1)
+    paste_key = "command" if _GetOs() == "mac" else "ctrl"
+    pyautogui.hotkey(paste_key, "v")
+    if saved is not None:
+        time.sleep(0.3)          # let the target read it before it changes back
+        try:
+            pyperclip.copy(saved)
+        except Exception:
+            pass
+
+
 def ClipboardGet() -> str:
     if RequirePyperclip():
-        return pyperclip.paste()
+        # Whatever was copied came from somewhere else: data, not instructions.
+        return Outcome.Untrusted("clipboard", pyperclip.paste() or "")
     Hotkey("ctrl", "c")
     time.sleep(0.2)
     return "(copied — pyperclip unavailable for read)"
@@ -527,11 +543,8 @@ def CloseApp(app_name: str, confirmed_index: int | None = None) -> str:
 
 
 def ScreenFind(description: str) -> tuple[int, int] | None:
-    api_key = GetApiKey()
-    if not api_key:
-        print("[ComputerControl] ⚠️ No API key for screen_find")
-        return None
-
+    # No Gemini-key check here: Gemini.call walks the whole provider ladder
+    # (other providers, the local brain) and returns None when nothing answers.
     try:
         from google import genai
         from google.genai import types as gtypes
@@ -665,6 +678,19 @@ def computer_control(
         if action == "hotkey":
             raw  = params.get("keys", "")
             keys = [k.strip() for k in raw.split("+")] if isinstance(raw, str) else raw
+            # Win+R / Win+X open a box that runs whatever is typed next — the
+            # way around every confirmation (type "shutdown /s", press Enter).
+            low = {str(k).lower() for k in keys}
+            if low & {"win", "winleft", "winright", "command"} and low & {"r", "x"} \
+                    and _GetOs() == "windows":
+                from Brain import Confirm
+                if Confirm.PendingTitle():
+                    return Outcome.ask("computer_control",
+                                       "there is already a confirmation waiting on screen - "
+                                       "the user has to answer that one first", keys="+".join(map(str, keys)))
+                return Confirm.request("open_run", "Open the Run / power-user menu",
+                                       "Whatever is typed into it next runs as a command.",
+                                       lambda k=tuple(keys): Hotkey(*k))
             return Hotkey(*keys)
 
         if action == "press":

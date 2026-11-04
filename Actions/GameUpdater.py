@@ -840,13 +840,15 @@ def ScheduleWindows(hour: int, minute: int) -> str:
     task_name   = "ORION_GameUpdater"
     script_path = Path(__file__).resolve()
     subprocess.run(["schtasks", "/Delete", "/TN", task_name, "/F"], capture_output=True, **_CNW)
-    for extra in (["/RL", "HIGHEST", "/RU", "SYSTEM"], []):
-        cmd    = ["schtasks", "/Create", "/TN", task_name,
-                  "/TR", f'"{sys.executable}" "{script_path}" --scheduled',
-                  "/SC", "DAILY", "/ST", f"{hour:02d}:{minute:02d}", "/F", *extra]
-        result = subprocess.run(cmd, capture_output=True, text=True, **_CNW)
-        if result.returncode == 0:
-            return f"Daily game update scheduled at {hour:02d}:{minute:02d}."
+    # The current user only, at normal rights. It used to try SYSTEM at the
+    # highest level first: a user-writable script run as SYSTEM is a privilege
+    # escalation, and as SYSTEM it had the wrong profile and no desktop anyway.
+    cmd    = ["schtasks", "/Create", "/TN", task_name,
+              "/TR", f'"{sys.executable}" "{script_path}" --scheduled',
+              "/SC", "DAILY", "/ST", f"{hour:02d}:{minute:02d}", "/F", "/RL", "LIMITED"]
+    result = subprocess.run(cmd, capture_output=True, text=True, **_CNW)
+    if result.returncode == 0:
+        return f"Daily game update scheduled at {hour:02d}:{minute:02d}."
     return f"Scheduling failed: {result.stderr.strip()}"
 
 

@@ -35,11 +35,10 @@ _CORE: list[tuple[str, str]] = [
     ("youtube_transcript_api", "youtube-transcript-api"),
 ]
 
-# Windows-only (pywinauto, pycaw, win10toast, comtypes)
+# Windows-only (pywinauto, pycaw, comtypes)
 _WINDOWS: list[tuple[str, str]] = [
     ("comtypes",   "comtypes"),
     ("pycaw",      "pycaw"),
-    ("win10toast", "win10toast"),
     ("pywinauto",  "pywinauto"),
 ]
 

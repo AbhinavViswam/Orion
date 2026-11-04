@@ -180,18 +180,24 @@ def ScheduleWindows(target_dt: datetime, task_name: str,
     if pythonw.exists():
         python_exe = pythonw
 
+    from datetime import timedelta
+    from xml.sax.saxutils import escape as _esc
     xml_path = ScriptsDir() / f"{task_name}.xml"
+    # EndBoundary + DeleteExpiredTaskAfter: Task Scheduler removes the task
+    # itself once it has fired, instead of one task piling up per reminder.
+    end_dt = target_dt + timedelta(hours=1)
     xml_content = (
         '<?xml version="1.0" encoding="UTF-16"?>\n'
         '<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">\n'
         '  <RegistrationInfo><Description>ORION Reminder</Description></RegistrationInfo>\n'
         '  <Triggers><TimeTrigger>\n'
         f'    <StartBoundary>{target_dt.strftime("%Y-%m-%dT%H:%M:%S")}</StartBoundary>\n'
+        f'    <EndBoundary>{end_dt.strftime("%Y-%m-%dT%H:%M:%S")}</EndBoundary>\n'
         '    <Enabled>true</Enabled>\n'
         '  </TimeTrigger></Triggers>\n'
         '  <Actions><Exec>\n'
-        f'    <Command>{python_exe}</Command>\n'
-        f'    <Arguments>"{script_path}"</Arguments>\n'
+        f'    <Command>{_esc(str(python_exe))}</Command>\n'
+        f'    <Arguments>"{_esc(str(script_path))}"</Arguments>\n'
         '  </Exec></Actions>\n'
         '  <Settings>\n'
         '    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>\n'
@@ -199,6 +205,7 @@ def ScheduleWindows(target_dt: datetime, task_name: str,
         '    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>\n'
         '    <StartWhenAvailable>true</StartWhenAvailable>\n'
         '    <ExecutionTimeLimit>PT5M</ExecutionTimeLimit>\n'
+        '    <DeleteExpiredTaskAfter>PT0S</DeleteExpiredTaskAfter>\n'
         '    <Enabled>true</Enabled>\n'
         '  </Settings>\n'
         '  <Principals><Principal>\n'

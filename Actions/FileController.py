@@ -94,16 +94,78 @@ _SAFE_ROOTS: list[Path] = [
     Path.home(),
 ]
 
+# Inside home but never touched: app data and the Startup folder (AppData),
+# macOS Library, every dot-folder (.ssh keys, .aws, .config, browser and tool
+# profiles) and the PowerShell profile folders, which run code at every shell.
+_SENSITIVE_TOP = {"appdata", "library"}
+_SENSITIVE_UNDER_DOCUMENTS = {"windowspowershell", "powershell"}
+
+
+def IsSensitivePath(resolved: Path) -> bool:
+    try:
+        home = Path.home().resolve()
+        if not resolved.is_relative_to(home):
+            return False
+        parts = resolved.relative_to(home).parts
+    except Exception:
+        return True
+    if not parts:
+        return False
+    top = parts[0].lower()
+    if top.startswith(".") or top in _SENSITIVE_TOP:
+        return True
+    try:
+        docs = GetDocuments().resolve()
+        if resolved.is_relative_to(docs):
+            sub = resolved.relative_to(docs).parts
+            if sub and sub[0].lower() in _SENSITIVE_UNDER_DOCUMENTS:
+                return True
+    except Exception:
+        pass
+    return False
+
+
 def IsSafePath(target: Path) -> bool:
-    """Is the given path inside _SAFE_ROOTS? If not, reject the operation."""
+    """Is the given path inside _SAFE_ROOTS, and not a sensitive folder? If not, reject the operation."""
     try:
         resolved = target.resolve()
-        return any(
+        inside = any(
             resolved == root.resolve() or resolved.is_relative_to(root.resolve())
             for root in _SAFE_ROOTS
         )
+        return inside and not IsSensitivePath(resolved)
     except Exception:
         return False
+
+
+# Files Windows (or a double-click) will run. Writing one is how a sentence
+# on a web page becomes code that runs at the next login, so these wait for
+# the on-screen confirm; every other file is written at once, with undo.
+_EXECUTABLE_EXTS = {
+    ".bat", ".cmd", ".ps1", ".psm1", ".psd1", ".vbs", ".vbe", ".js", ".jse",
+    ".wsf", ".wsh", ".exe", ".com", ".scr", ".msi", ".lnk", ".url", ".reg",
+    ".hta", ".cpl", ".dll", ".pif", ".sh", ".command", ".desktop",
+}
+
+
+def _IsExecutableName(name: str) -> bool:
+    return Path(str(name).strip().rstrip(". ")).suffix.lower() in _EXECUTABLE_EXTS
+
+
+def _GateExecutable(target_name: str, what: str, run) -> str | None:
+    """Confirm-gate a write that would create a runnable file. None = not gated, go ahead."""
+    if not _IsExecutableName(target_name):
+        return None
+    from Brain import Confirm
+    if Confirm.PendingTitle():
+        return ("Not done: another confirmation is already waiting on screen - "
+                "the user has to answer that one first.")
+    return Confirm.request(
+        "file_executable",
+        f"{what} runnable file '{Path(target_name).name}'"[:120],
+        "This file type can run code when opened. Confirm only if you asked for it.",
+        run,
+    )
 
 def GetDesktop() -> Path:
     if _OS == "Linux":
@@ -411,9 +473,12 @@ def ReadFile(path: str, name: str = "", max_chars: int = 4000) -> str:
         if not target.is_file():
             return f"Not a file: {target.name}"
 
-        content = target.read_text(encoding="utf-8", errors="ignore")
+        # Read only what is returned: a multi-GB log must not land in memory.
+        size = target.stat().st_size
+        with open(target, "r", encoding="utf-8", errors="ignore") as f:
+            content = f.read(max_chars + 1)
         if len(content) > max_chars:
-            content = content[:max_chars] + f"\n\n[Truncated — {len(content)} total chars]"
+            content = content[:max_chars] + f"\n\n[Truncated — file is {FormatSize(size)}]"
         return content
 
     except Exception as e:
@@ -671,7 +736,10 @@ def file_controller(
             return ListFiles(path)
 
         elif action == "create_file":
-            return CreateFile(path, name=name, content=params.get("content", ""))
+            content = params.get("content", "")
+            gated = _GateExecutable(name or path, "Create",
+                                    lambda: CreateFile(path, name=name, content=content))
+            return gated or CreateFile(path, name=name, content=content)
 
         elif action == "create_folder":
             return CreateFolder(path, name=name)
@@ -686,17 +754,20 @@ def file_controller(
             return CopyFile(path, name=name, destination=params.get("destination", ""))
 
         elif action == "rename":
-            return RenameFile(path, name=name, new_name=params.get("new_name", ""))
+            new_name = params.get("new_name", "")
+            gated = _GateExecutable(new_name, "Rename to",
+                                    lambda: RenameFile(path, name=name, new_name=new_name))
+            return gated or RenameFile(path, name=name, new_name=new_name)
 
         elif action == "read":
             return ReadFile(path, name=name)
 
         elif action == "write":
-            return WriteFile(
-                path, name=name,
-                content=params.get("content", ""),
-                append=params.get("append", False)
-            )
+            content = params.get("content", "")
+            append = params.get("append", False)
+            gated = _GateExecutable(name or path, "Write",
+                                    lambda: WriteFile(path, name=name, content=content, append=append))
+            return gated or WriteFile(path, name=name, content=content, append=append)
 
         elif action == "find":
             return FindFiles(

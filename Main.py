@@ -15,10 +15,15 @@ if _platform.system() == "Windows":
     _OrigPopen = _subprocess.Popen
 
     class _Popen(_OrigPopen):
-        def __init__(self, args, **kw):
-            kw["creationflags"] = kw.get("creationflags", 0) | _subprocess.CREATE_NO_WINDOW
-            kw.pop("startupinfo", None)   # drop any stale/shared STARTUPINFO
-            super().__init__(args, **                       kw)
+        def __init__(self, args, *a, **kw):
+            # Only add the flag. Positional args (bufsize, executable, …) and a
+            # caller's own STARTUPINFO pass through untouched — Popen copies it.
+            if len(a) >= 13:   # creationflags given positionally
+                a = list(a)
+                a[12] = (a[12] or 0) | _subprocess.CREATE_NO_WINDOW
+            else:
+                kw["creationflags"] = (kw.get("creationflags") or 0) | _subprocess.CREATE_NO_WINDOW
+            super().__init__(args, *a, **kw)
 
     _subprocess.Popen = _Popen
 
@@ -646,6 +651,8 @@ class OrionLive:
         self._proactive        = ProactiveEngine()
         self._last_user_speech = time.monotonic()  # updated on every user utterance
         self._session_log: list[str] = []          # conversation turns for end-of-session summary
+        self._log_local: bool | None = None         # the brain those turns were held with (on-device?)
+        self._bg_tasks: set = set()                 # fire-and-forget tasks, kept so they aren't collected
 
         self._enhanced_live = True  # proactive audio; auto-disabled if the server rejects it
         self._tuned_live    = True  # turn-taking / media / thinking knobs; same fallback
@@ -1072,7 +1079,20 @@ class OrionLive:
                 pass
 
     def interrupt(self) -> None:
-        """Stop ORION mid-speech: drain queued audio and open mic immediately."""
+        """Stop ORION mid-speech: drain queued audio and open mic immediately.
+        Safe from any thread: the asyncio queue, event and the engine's task are
+        only touched on the event loop's own thread."""
+        loop = getattr(self, "_loop", None)
+        try:
+            here = asyncio.get_running_loop()
+        except RuntimeError:
+            here = None
+        if loop is not None and loop.is_running() and here is not loop:
+            loop.call_soon_threadsafe(self._InterruptNow)
+            return
+        self._InterruptNow()
+
+    def _InterruptNow(self) -> None:
         # Only drop the rest of a Live reply that is still arriving. If its turn_complete already came
         # (or this is a private/local line), nothing would clear the flag and the NEXT answer would be lost.
         if self._engine is None and self._reply_live:
@@ -1382,11 +1402,13 @@ class OrionLive:
                     q.put_nowait(pcm[i:i + 4800])
             return True
 
+        fut = asyncio.run_coroutine_threadsafe(Make(), loop)
         try:
-            if not asyncio.run_coroutine_threadsafe(Make(), loop).result(timeout):
+            if not fut.result(timeout):
                 return False
         except Exception as e:
-            print(f"[Talk] Orion's line failed: {e}")
+            fut.cancel()        # a line given up on must not keep speaking
+            print(f"[Talk] Orion's line failed: {e or 'timed out'}")
             return False
         end = time.monotonic() + timeout
         time.sleep(0.4)
@@ -1450,8 +1472,15 @@ class OrionLive:
                 cfg = LocalBrain.TtsConfig()
                 if cfg["voice"] in TtsPiper.installed():
                     voice = Registry.build(LocalBrain.TTS_ID, cfg)
-                else:
-                    threading.Thread(target=lambda: TtsPiper.prepare(cfg), daemon=True).start()
+                elif cfg["voice"] not in getattr(self, "_voice_fetching", set()):
+                    # Started once per voice; the download itself is locked per voice too.
+                    self._voice_fetching = getattr(self, "_voice_fetching", set()) | {cfg["voice"]}
+                    def Fetch(cfg=cfg):
+                        try:
+                            TtsPiper.prepare(cfg)
+                        finally:
+                            self._voice_fetching = self._voice_fetching - {cfg["voice"]}
+                    threading.Thread(target=Fetch, daemon=True).start()
         except Exception as e:
             print(f"[Privacy] Piper unavailable: {e}")
         if voice is None:
@@ -1562,16 +1591,21 @@ class OrionLive:
                     self._vision_last_time = _now
                     angle     = args.get("angle", "screen").lower()
                     user_text = args.get("text", "What do you see?")
-                    if angle == "camera":
-                        img_b, mime_t = await loop.run_in_executor(None, CaptureCamera)
-                        self.ui.StartCameraStream()
-                        self._vision_cam_active = True
-                        print(f"[Vision] 📷 Camera: {len(img_b):,} bytes")
-                        _stall = "camera"
-                    else:
-                        img_b, mime_t = await loop.run_in_executor(None, CaptureScreen)
-                        print(f"[Vision] 🖥️  Screen: {len(img_b):,} bytes")
-                        _stall = "screen"
+                    try:
+                        if angle == "camera":
+                            img_b, mime_t = await loop.run_in_executor(None, CaptureCamera)
+                            self.ui.StartCameraStream()
+                            self._vision_cam_active = True
+                            print(f"[Vision] 📷 Camera: {len(img_b):,} bytes")
+                            _stall = "camera"
+                        else:
+                            img_b, mime_t = await loop.run_in_executor(None, CaptureScreen)
+                            print(f"[Vision] 🖥️  Screen: {len(img_b):,} bytes")
+                            _stall = "screen"
+                    except BaseException:
+                        # A failed capture must not leave vision "busy" for the rest of the session.
+                        self._vision_busy = False
+                        raise
                     self._pending_vision = (img_b, mime_t, user_text, angle)
                     # The image is attached to this same exchange, so there is
                     # nothing to stall for and nothing to announce. Asking for an
@@ -1621,6 +1655,7 @@ class OrionLive:
                     await asyncio.sleep(1.5)
                     import os as _os
                     CrashWatch.MarkEnded()
+                    Usage.Flush()          # _exit skips atexit
                     _os._exit(0)
                 asyncio.create_task(_do_shutdown())
 
@@ -1784,7 +1819,8 @@ class OrionLive:
             # unplugged since the last run falls back to the built-in mic
             # instead of raising on startup and taking the session with it.
             _mic_name = GetInputDevice()
-            _mic_dev  = AudioDevices.resolve(_mic_name, "input")
+            # Off the event loop: it may enumerate and test-open devices.
+            _mic_dev  = await asyncio.to_thread(AudioDevices.resolve, _mic_name, "input")
             if _mic_dev is not None:
                 print(f"[ORION] 🎤 Input device: {_mic_name}")
             def OpenAny():
@@ -1807,6 +1843,7 @@ class OrionLive:
             # is shut so Windows shows no app using the mic, and opened again on
             # unmute.
             _mic_stream = None
+            _retry_at, _retry_wait = 0.0, 0.0
             try:
                 while True:
                     if self.ui.muted:
@@ -1815,10 +1852,28 @@ class OrionLive:
                             _mic_stream.close()
                             _mic_stream = None
                             print("[ORION] 🎤 Mic closed (muted)")
-                    elif _mic_stream is None:
-                        _mic_stream = OpenAny()
-                        _mic_stream.start()
-                        print("[ORION] 🎤 Mic stream open")
+                    elif _mic_stream is None and time.monotonic() >= _retry_at:
+                        try:
+                            _mic_stream = OpenAny()
+                            _mic_stream.start()
+                            print("[ORION] 🎤 Mic stream open")
+                            _retry_wait = 0.0
+                        except Exception as _e:
+                            # No microphone at all (none plugged in, all held in
+                            # exclusive mode): typed commands and the voice still
+                            # work, so keep the session and try again slowly
+                            # instead of tearing it down and reconnecting.
+                            if _mic_stream is not None:
+                                try:
+                                    _mic_stream.close()
+                                except Exception:
+                                    pass
+                                _mic_stream = None
+                            if not _retry_wait:
+                                print(f"[ORION] ❌ Mic: {_e} — retrying")
+                                self.ui.WriteLog("SYS: No microphone could be opened — I'll keep trying. Typing still works.")
+                            _retry_wait = min(max(_retry_wait * 2, 5.0), 60.0)
+                            _retry_at = time.monotonic() + _retry_wait
                     # Check faster in hold-to-speak so the first word after the
                     # keys go down is not clipped.
                     await asyncio.sleep(0.02 if self._ptt_enabled else 0.1)
@@ -1859,13 +1914,18 @@ class OrionLive:
         # label *means* is explained once, in the generated [SELF] block.
         src = ("[IMAGE SOURCE: WEBCAM]" if angle == "camera"
                else "[IMAGE SOURCE: SCREEN CAPTURE]")
-        await self.session.send_client_content(
-            turns={"role": "user", "parts": [
-                {"inline_data": {"mime_type": mime_t, "data": b64}},
-                {"text": f"{src}\n\n{question}"},
-            ]},
-            turn_complete=True,
-        )
+        try:
+            await self.session.send_client_content(
+                turns={"role": "user", "parts": [
+                    {"inline_data": {"mime_type": mime_t, "data": b64}},
+                    {"text": f"{src}\n\n{question}"},
+                ]},
+                turn_complete=True,
+            )
+        except BaseException:
+            self._vision_busy = False      # never sent: nothing left to wait for
+            self._vision_cam_active = False
+            raise
 
         if self._vision_cam_active:
             # Camera: stay busy until ORION has finished speaking the answer,
@@ -2036,7 +2096,8 @@ class OrionLive:
         print("[ORION] 🔊 Play started")
 
         _spk_name = GetOutputDevice()
-        _spk_dev  = AudioDevices.resolve(_spk_name, "output")
+        # Off the event loop: it may enumerate and test-open devices.
+        _spk_dev  = await asyncio.to_thread(AudioDevices.resolve, _spk_name, "output")
         if _spk_dev is not None:
             print(f"[ORION] 🔊 Output device: {_spk_name}")
 
@@ -2051,17 +2112,41 @@ class OrionLive:
             st.start()
             return st
 
-        try:
-            stream = OpenSpk(_spk_dev)
-        except Exception as _e:
-            # A chosen output that the host API accepts by name but refuses to
-            # open (exclusive mode, wrong sample rate, device asleep) must not
-            # cost the user their voice. Fall back to the default and say so.
-            if _spk_dev is None:
-                raise
-            print(f"[ORION] ⚠️  Output device '{_spk_name}' failed: {_e} — using default")
-            self.ui.WriteLog(f"SYS: Speaker '{_spk_name}' unavailable — using system default.")
-            stream = OpenSpk(None)
+        def OpenAnySpk():
+            try:
+                return OpenSpk(_spk_dev)
+            except Exception as _e:
+                # A chosen output that the host API accepts by name but refuses to
+                # open (exclusive mode, wrong sample rate, device asleep) must not
+                # cost the user their voice. Fall back to the default and say so.
+                if _spk_dev is None:
+                    raise
+                print(f"[ORION] ⚠️  Output device '{_spk_name}' failed: {_e} — using default")
+                self.ui.WriteLog(f"SYS: Speaker '{_spk_name}' unavailable — using system default.")
+                return OpenSpk(None)
+
+        async def OpenWithRetry():
+            """No speaker at all must not end the session (typed commands and the
+            log still work): drop what can't be played and try again slowly."""
+            wait = 0.0
+            while True:
+                try:
+                    return OpenAnySpk()
+                except Exception as _e:
+                    if not wait:
+                        print(f"[ORION] ❌ Play: {_e} — retrying")
+                        self.ui.WriteLog("SYS: No speaker could be opened — I'll keep trying.")
+                    wait = min(max(wait * 2, 5.0), 60.0)
+                    until = time.monotonic() + wait
+                    while time.monotonic() < until:
+                        while not self.audio_in_queue.empty():
+                            self.audio_in_queue.get_nowait()
+                        if self._turn_done_event:
+                            self._turn_done_event.clear()
+                        self.SetSpeaking(False)
+                        await asyncio.sleep(0.2)
+
+        stream = await OpenWithRetry()
 
         # Ask the device how far behind the speakers actually are, rather than
         # assuming. This is what the echo tail is sized from, so a machine with a
@@ -2076,6 +2161,7 @@ class OrionLive:
         except Exception:
             pass
 
+        write = None
         try:
             while True:
                 try:
@@ -2160,17 +2246,36 @@ class OrionLive:
                 except Exception:
                     pass
 
+                # Shielded: a cancel must not leave the worker thread inside
+                # stream.write while the stream is closed under it (below).
+                write = asyncio.ensure_future(asyncio.to_thread(stream.write, bytes(batch)))
                 try:
-                    await asyncio.to_thread(stream.write, bytes(batch))
+                    await asyncio.shield(write)
                 except (RuntimeError, asyncio.CancelledError):
                     break   # executor shutting down — exit cleanly
+                except sd.PortAudioError as _e:
+                    # The speaker went away mid-reply (unplugged, driver reset).
+                    print(f"[ORION] ⚠️  Speaker lost: {_e} — reopening")
+                    try:
+                        stream.close()
+                    except Exception:
+                        pass
+                    stream = await OpenWithRetry()
         except Exception as e:
             print(f"[ORION] ❌ Play: {e}")
             raise
         finally:
             self.SetSpeaking(False)
-            stream.stop()
-            stream.close()
+            if write is not None and not write.done():
+                try:
+                    await asyncio.wait({write}, timeout=2.0)   # at most ~200 ms of audio
+                except BaseException:
+                    pass
+            try:
+                stream.stop()
+                stream.close()
+            except Exception:
+                pass
 
     # ── Morning briefing ────────────────────────────────────────────────────────
 
@@ -2212,7 +2317,8 @@ class OrionLive:
         name_clause = f" Address the user as {name}." if name else ""
 
         # Inject last session context if available — pop removes it so it's never repeated
-        last = await asyncio.to_thread(PopLastSession)
+        # A Gemini session leaves on-device summaries where they are (not popped and lost).
+        last = await asyncio.to_thread(PopLastSession, not self.LocalSession())
         if last and last.get("local") and not self.LocalSession():
             last = None            # an on-device chat's summary never goes to Gemini
         session_clause = ""
@@ -2321,21 +2427,25 @@ class OrionLive:
             reply = Gemini.ProviderCall(Gemini.LOCAL_RUNG, prompt, None, 120_000)
             return (getattr(reply, "text", "") or "").strip()
         except Exception as e:
-            print(f"[Memory] local session summary failed ({e}); using Gemini.")
+            print(f"[Memory] local session summary failed ({e}).")
             return ""
         finally:
             if not LocalBrain.ACTIVE:
                 LocalBrain.Release()
 
-    async def _SaveSessionSummary(self, local: bool | None = None) -> None:
+    async def _SaveSessionSummary(self, local: bool | None = None, log: list[str] | None = None) -> None:
         """Summarise the current session in 1-2 sentences and save to LongTerm.json.
-        `local`: the session ran on the laptop's own brain (worked out now when not given)."""
+        `local`: the session ran on the laptop's own brain (worked out now when not given).
+        `log`: turns already taken off `_session_log` by the caller (else taken here)."""
         if local is None:
             local = self.LocalSession()
-        log = self._session_log
+        if log is None:
+            log = self._session_log
+            if len(log) < 3:
+                return
+            self._session_log = []    # reset immediately so the next session starts clean
         if len(log) < 3:          # need at least one exchange to be worth saving
             return
-        self._session_log = []    # reset immediately so the next session starts clean
 
         memory = LoadMemory()
         lang_entry = memory.get("identity", {}).get("language", {})
@@ -2351,9 +2461,15 @@ class OrionLive:
         try:
             from Brain import Gemini
             summary = ""
-            if Privacy.On() and LocalBrain.Installed():
-                # Private mode: the laptop's own model writes it (plan §6). On-device
-                # mode gets here through Gemini.text below, whose only rung is local.
+            if local:
+                # An on-device conversation never goes to Gemini: only the laptop's
+                # own model may summarise it, and on failure there is no summary.
+                summary = await asyncio.to_thread(self.SummariseLocally, prompt)
+                if not summary:
+                    print("[Memory] on-device session summary skipped.")
+                    return
+            elif Privacy.On() and LocalBrain.Installed():
+                # Private mode: the laptop's own model writes it (plan §6).
                 summary = await asyncio.to_thread(self.SummariseLocally, prompt)
             if not summary:
                 summary = await asyncio.to_thread(
@@ -2759,8 +2875,21 @@ class OrionLive:
                 # Clear BEFORE reading the settings: a change made while connecting stays set
                 # and rebuilds the session again, instead of being dropped.
                 self._reconnect_event.clear()
-                self._engine_caps = self.ResolveEngineCaps()
+                # Off the loop: the first time a model is used it is asked whether it can see (up to 25 s).
+                self._engine_caps = await asyncio.to_thread(self.ResolveEngineCaps)
                 LocalBrain.ACTIVE = self.LocalSession()
+                # One summary per conversation, not per reconnect: the turns carry
+                # over reconnects and are summarised only when the brain changes
+                # (on-device <-> Gemini) or Orion quits. The two are never mixed,
+                # so an on-device chat can't end up in a Gemini summary.
+                _now_local = self.LocalSession()
+                if self._log_local is not None and self._log_local != _now_local and self._session_log:
+                    _old, self._session_log = self._session_log, []
+                    _t = asyncio.create_task(self._SaveSessionSummary(local=self._log_local, log=_old))
+                    self._bg_tasks.add(_t)
+                    _t.add_done_callback(self._bg_tasks.discard)
+                self._log_local = _now_local
+                del self._session_log[:-80]
                 config = self.BuildConfig()
 
                 # The conversation itself. `_open_session` gives back a Gemini
@@ -2939,7 +3068,13 @@ class OrionLive:
                 # (preview API drift) — drop them first, because they are the
                 # newest fields and the cheapest to lose. Proactive audio is
                 # tried again on the next pass if the error persists.
-                if self._tuned_live and (
+                # A rejected tool declaration (a plugin's schema) is also an
+                # INVALID_ARGUMENT, but dropping these settings can't fix it.
+                _tool_err = any(k in err_str for k in (
+                    "function_declaration", "functionDeclaration", "tools[", "parameters."))
+                if _tool_err:
+                    print(f"[ORION] Gemini rejected a tool declaration: {err_str[:300]}")
+                if self._tuned_live and not _tool_err and (
                     "INVALID_ARGUMENT" in err_str
                     or "Unknown name" in err_str
                     or "unexpected keyword" in err_str
@@ -2948,12 +3083,13 @@ class OrionLive:
                     or "thinking" in err_str.lower()
                 ):
                     self._tuned_live = False
-                    print("[ORION] Live tuning rejected — reconnecting without it.")
+                    print(f"[ORION] Live tuning rejected — reconnecting without it: {err_str[:200]}")
+                    self.ui.WriteLog("SYS: Gemini refused the voice tuning settings — reconnecting without them.")
                     continue
 
                 # Proactive audio rejected by the server (preview API drift) —
                 # drop it and reconnect with the plain config.
-                if self._enhanced_live and (
+                if self._enhanced_live and not _tool_err and (
                     "INVALID_ARGUMENT" in err_str
                     or "proactiv" in err_str.lower()
                     or "Unknown name" in err_str
@@ -3006,9 +3142,8 @@ class OrionLive:
                         CrashWatch.Report(_tb, "the voice session")
             finally:
                 self.session = None
-                # Only save if there was a real conversation (≥3 turns)
-                if len(self._session_log) >= 3:
-                    asyncio.create_task(self._SaveSessionSummary(local=self.LocalSession()))
+                # The session summary is not written here: a reconnect is not the
+                # end of the conversation (see where the brain is chosen, above).
 
             self.SetSpeaking(False)
             self.ui.SetState("SLEEPING")
@@ -3062,12 +3197,14 @@ def BugTracebacks(e: BaseException) -> list[str]:
 
 
 def main():
-    CrashWatch.Install()
-    import atexit
-    atexit.register(LocalBrain.Release)    # never leave the model holding the graphics card
     ui = OrionUI()
     if getattr(ui, "duplicate", False):
         return                              # the running Orion was asked to show itself
+    # Only the one running copy: a duplicate must not truncate its crash log
+    # or mark its run as ended.
+    CrashWatch.Install()
+    import atexit
+    atexit.register(LocalBrain.Release)    # never leave the model holding the graphics card
 
     def runner():
         ui.WaitForApiKey()

@@ -301,9 +301,12 @@ def ProcessTextDoc(path: Path, file_type: str, action: str,
     }
 
     if action not in prompt_map:
-
-        action  = "custom"
-        instruction = action
+        # An action this tool has no prompt for ("translate to Turkish") is the
+        # instruction itself, unless one was given. The prompt is rebuilt here:
+        # the map above was made before this line ran.
+        instruction = instruction or action
+        prompt_map["custom"] = f"{instruction}\n\n{content[:40000]}"
+        action = "custom"
 
     try:
         model    = GeminiClient()
@@ -329,7 +332,7 @@ def ProcessData(path: Path, file_type: str, action: str,
 
     try:
         if file_type == "csv":
-            df = pd.read_csv(path, encoding="utf-8", errors="replace")
+            df = pd.read_csv(path, encoding="utf-8", encoding_errors="replace")
         else:
             df = pd.read_excel(path)
     except Exception as e:
@@ -465,17 +468,26 @@ def ProcessCode(path: Path, action: str, params: dict, speak=None) -> str:
 
     if action == "run":
         if ext == "py":
-            try:
-                result = subprocess.run(
-                    [sys.executable, str(path)],
-                    capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30
-                )
-                out = result.stdout or result.stderr
-                return f"Output:\n{out[:2000]}" if out else "No output."
-            except subprocess.TimeoutExpired:
-                return "Execution timed out (30s)."
-            except Exception as e:
-                return f"Run failed: {e}"
+            def Go() -> str:
+                try:
+                    result = subprocess.run(
+                        [sys.executable, str(path)],
+                        capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30
+                    )
+                    out = result.stdout or result.stderr
+                    return f"Output:\n{out[:2000]}" if out else "No output."
+                except subprocess.TimeoutExpired:
+                    return "Execution timed out (30s)."
+                except Exception as e:
+                    return f"Run failed: {e}"
+            # Running a file is not undoable: it waits for the on-screen confirm.
+            from Brain import Confirm
+            if Confirm.PendingTitle():
+                return ("Not run: another confirmation is already waiting on screen - "
+                        "the user has to answer that one first.")
+            return Confirm.request("file_run", f"Run {path.name}"[:120],
+                                   "Orion will run this Python file. Confirm only if you asked for it.",
+                                   Go)
         return f"Direct execution not supported for .{ext} files."
 
     if action == "info":
@@ -543,9 +555,10 @@ def ProcessAudio(path: Path, action: str, params: dict, speak=None) -> str:
                 "ogg": "audio/ogg", "m4a": "audio/mp4",
                 "aac": "audio/aac", "flac": "audio/flac",
             }.get(path.suffix.lstrip(".").lower(), "audio/mpeg")
+            from google.genai import types as gtypes
             response = model.generate_content([
                 "Transcribe all speech in this audio file accurately.",
-                {"mime_type": mime, "data": content}
+                gtypes.Part.from_bytes(data=content, mime_type=mime),
             ])
             result = response.text.strip()
             if params.get("save", True):
@@ -796,7 +809,13 @@ from Brain import Outcome
 
 
 def FileProcessor(parameters: dict, player=None, speak=None) -> str:
-    file_path_str = parameters.get("file_path", "").strip()
+    # The short brief once named these 'path' and 'query'; accept both spellings.
+    parameters = dict(parameters or {})
+    if not parameters.get("file_path") and parameters.get("path"):
+        parameters["file_path"] = parameters["path"]
+    if not parameters.get("instruction") and parameters.get("query"):
+        parameters["instruction"] = parameters["query"]
+    file_path_str = str(parameters.get("file_path", "")).strip()
     if not file_path_str:
         return "No file path provided."
 
@@ -846,6 +865,10 @@ def FileProcessor(parameters: dict, player=None, speak=None) -> str:
     if not handler:
         return f"Unsupported file type: {file_type}"
 
+    if file_type == "code" and action == "run":
+        # The confirmation sentence is Orion's own, not the file's: not fenced.
+        return ProcessCode(path, action, params, speak)
+
     try:
         result = handler(path, action, params, speak)
         # A document's contents are not the user speaking. A PDF, a spreadsheet
@@ -868,7 +891,7 @@ TOOL = {
     # Used in place of `description` only when a small model is on a tool
     # budget - Gemini still gets the full text. See providers/schema.py.
     "brief": (
-        "Reads a local file and answers questions about it or summarises it. Put the path in 'path' and what is wanted in 'query'."
+        "Reads a local file and answers questions about it or summarises it. Put the path in 'file_path' and what is wanted in 'instruction'."
     ),
     "tier": "core",
     "parameters": {

@@ -39,6 +39,7 @@ import time
 from pathlib import Path
 from typing import Callable, Optional
 
+from System import Secrets
 from System import TelegramApi as Api
 from System import TelegramRules as R
 
@@ -83,52 +84,15 @@ def _InboxDir() -> Path:
 # ── the token, kept with Windows' own encryption ─────────────────────────────
 
 def _Protect(secret: str) -> str:
-    data = secret.encode("utf-8")
-    if sys.platform == "win32":
-        try:
-            blob = _Dpapi(data, protect=True)
-            return "dpapi:" + base64.b64encode(blob).decode()
-        except Exception:
-            pass
-    return "plain:" + base64.b64encode(data).decode()
+    return Secrets.Protect(secret.encode("utf-8"), "Orion Telegram bot")
 
 
 def _Unprotect(stored: str) -> Optional[str]:
     try:
-        kind, _, b64 = str(stored or "").partition(":")
-        blob = base64.b64decode(b64)
-        if kind == "dpapi":
-            return _Dpapi(blob, protect=False).decode("utf-8")
-        if kind == "plain":
-            return blob.decode("utf-8")
+        data = Secrets.Unprotect(stored)
+        return data.decode("utf-8") if data is not None else None
     except Exception:
-        pass
-    return None
-
-
-def _Dpapi(data: bytes, protect: bool) -> bytes:
-    import ctypes
-    from ctypes import wintypes
-
-    class Blob(ctypes.Structure):
-        _fields_ = [("cbData", wintypes.DWORD), ("pbData", ctypes.POINTER(ctypes.c_char))]
-
-    buf = ctypes.create_string_buffer(data, len(data))
-    inb = Blob(len(data), ctypes.cast(buf, ctypes.POINTER(ctypes.c_char)))
-    out = Blob()
-    crypt32, kernel32 = ctypes.windll.crypt32, ctypes.windll.kernel32
-    UI_FORBIDDEN = 0x1
-    if protect:
-        ok = crypt32.CryptProtectData(ctypes.byref(inb), "Orion Telegram bot", None, None, None, UI_FORBIDDEN,
-                                      ctypes.byref(out))
-    else:
-        ok = crypt32.CryptUnprotectData(ctypes.byref(inb), None, None, None, None, UI_FORBIDDEN, ctypes.byref(out))
-    if not ok:
-        raise OSError("DPAPI failed")
-    try:
-        return ctypes.string_at(out.pbData, out.cbData)
-    finally:
-        kernel32.LocalFree(out.pbData)
+        return None
 
 
 _store_lock = threading.Lock()
@@ -148,7 +112,15 @@ def _Write(d: dict) -> None:
     p.parent.mkdir(parents=True, exist_ok=True)
     tmp = p.with_suffix(".tmp")
     tmp.write_text(json.dumps(d, indent=2), "utf-8")
-    tmp.replace(p)
+    # Antivirus, or a reader on another thread, can hold the file open for a moment: try again before giving up.
+    for attempt in range(5):
+        try:
+            tmp.replace(p)
+            return
+        except PermissionError:
+            if attempt == 4:
+                raise
+            time.sleep(0.1 * (attempt + 1))
 
 
 def Save(d: dict) -> None:
@@ -374,6 +346,21 @@ class Link:
     # ── the loop ────────────────────────────────────────────────────────────
 
     def _Poll(self) -> None:
+        """One error (a file held open, a bad message) must not end the bot for good while the status still says
+        "listening": the loop starts again after a short wait."""
+        crashes = 0
+        while not self._stop.is_set():
+            try:
+                self._PollLoop()
+                return
+            except Exception as e:
+                crashes += 1
+                print(f"[Telegram] poll loop error: {e.__class__.__name__}")   # not the text: it may hold the URL
+                self.status = ("Something went wrong. Trying again.", False)
+                self._wake.wait(min(2 * 2 ** min(crashes - 1, 5), 60))
+                self._wake.clear()
+
+    def _PollLoop(self) -> None:
         failures = 0
         token_for = (None, None)
         quick = True                       # the first ask after (re)starting returns at once, so the status is fresh
@@ -733,9 +720,10 @@ class Link:
             show(title, detail)
             if self.turn_running:
                 pid = gate.PendingId()
-                if pid:
+                key = gate.PendingDetail()[0] if pid else ""
+                if pid and key not in ("skill_forge", "self_repair", "self_repair_rollback"):
+                    # (new code is approved only at the laptop, where it is shown)
                     from Brain import Privacy
-                    key = gate.PendingDetail()[0]
                     private = Privacy.Active() and key in gate.PRIVATE_KEYS and not Setting("details")
                     shown = "something private (details on the laptop)" if private else str(title)
                     question = f"Confirm: {shown}" + (f"\n{detail}" if detail and not private else "")

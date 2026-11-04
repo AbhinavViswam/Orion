@@ -99,7 +99,7 @@ def BandEnergies(pcm, sr: int) -> np.ndarray:
     Left unnormalised on purpose: the decision below projects one of these onto
     another, and a projection needs real magnitudes.
     """
-    x = np.asarray(pcm, dtype=np.float32)
+    x = np.asarray(pcm, dtype=np.float32).reshape(-1)   # a (frames, 1) mic block too
     if x.size < 64:
         return np.zeros(len(_BAND_EDGES) - 1, dtype=np.float32)
     x = x - x.mean()

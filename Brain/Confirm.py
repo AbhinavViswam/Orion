@@ -67,7 +67,7 @@ _hide_cb: Optional[Callable[[], None]] = None
 _log_cb:  Optional[Callable[[str], None]] = None
 
 # Confirmations whose titles name people or messages (Brain/Privacy.py).
-PRIVATE_KEYS = {"call_take_over", "phone_tap"}
+PRIVATE_KEYS = {"call_take_over", "phone_tap", "send_message"}
 
 
 def bind(show, hide, log=None) -> None:

@@ -216,6 +216,25 @@ class TestSessionSummary(_Base):
         self.assertEqual(self.Run(True, installed=False), (["gemini"], ["From Gemini."]))
         self.assertEqual(self.Run(True, local_says=""), (["local", "gemini"], ["From Gemini."]))
 
+    def RunLocal(self, local_says):
+        """An on-device session (Auto fallback, private mode off)."""
+        import Main
+        live = Main.OrionLive.__new__(Main.OrionLive)
+        live._session_log = ["User: hi", "Orion: hello", "User: dinner?", "Orion: pasta"]
+        live._engine_caps = {"local_brain": True}
+        asked, saved = [], []
+        Privacy.Save(on=False)
+        with mock.patch.object(Main.OrionLive, "SummariseLocally", staticmethod(lambda p: (asked.append("local"), local_says)[1])), \
+             mock.patch("Brain.Gemini.text", lambda *a, **k: (asked.append("gemini"), "From Gemini.")[1]), \
+             mock.patch.object(Main, "SaveSessionSummary", lambda s, lang="", local=False: saved.append((s, local))), \
+             mock.patch.object(Main, "LoadMemory", lambda: {}):
+            asyncio.run(Main.OrionLive._SaveSessionSummary(live))
+        return asked, saved
+
+    def TestAnOnDeviceChatNeverGoesToGemini(self):
+        self.assertEqual(self.RunLocal("Talked about dinner."), (["local"], [("Talked about dinner.", True)]))
+        self.assertEqual(self.RunLocal(""), (["local"], []))       # failed: no summary at all
+
 
 class TestDeskRunner(_Base):
     def TestAPrivateAnswerGoesStraightBack(self):

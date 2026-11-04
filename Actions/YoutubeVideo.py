@@ -118,6 +118,9 @@ def IsValidYoutubeUrl(url: str) -> bool:
     return bool(re.search(r"(youtube\.com|youtu\.be)", url or ""))
 
 
+_ASK_TIMEOUT_MS = 60_000
+
+
 def AskForUrl(prompt_text: str = "YouTube video URL:") -> str | None:
     try:
         import tkinter as tk
@@ -126,10 +129,16 @@ def AskForUrl(prompt_text: str = "YouTube video URL:") -> str | None:
         # A fresh root each time: a Tk root can't be shared across threads.
         root = tk.Tk()
         root.withdraw()
+        # Nobody may be at the desk (a Telegram or phone request): the modal
+        # box closes itself after a minute instead of holding the tool forever.
+        root.after(_ASK_TIMEOUT_MS, root.destroy)
         try:
             url = simpledialog.askstring("ORION", prompt_text, parent=root)
         finally:
-            root.destroy()
+            try:
+                root.destroy()
+            except Exception:
+                pass
         return url.strip() if url else None
     except Exception as e:
         print(f"[YouTube] ⚠️ URL dialog failed: {e}")
@@ -322,7 +331,9 @@ def HandleSummarize(parameters: dict, player, speak) -> str:
     if not _TRANSCRIPT_OK:
         return "youtube-transcript-api is not installed. Run: pip install youtube-transcript-api"
 
-    url = AskForUrl("Please paste the YouTube video URL:")
+    url = str(parameters.get("url", "") or "").strip()
+    if not url:
+        url = AskForUrl("Please paste the YouTube video URL:")
     if not url:
         return "No URL provided, sir. Summary cancelled."
     if not IsValidYoutubeUrl(url):
@@ -352,11 +363,14 @@ def HandleSummarize(parameters: dict, player, speak) -> str:
     if speak:
         speak(summary)
 
+    # Written from someone else's video: data for the model, not instructions.
+    from Brain import Outcome
     if parameters.get("save", False):
         saved_path = SaveSummary(summary, url)
-        return f"Summary complete and saved to Desktop: {saved_path}"
+        return (f"Summary complete and saved to Desktop: {saved_path}\n"
+                + Outcome.Untrusted("youtube", summary))
 
-    return summary
+    return Outcome.Untrusted("youtube", summary)
 
 
 def HandleGetInfo(parameters: dict, player, speak) -> str:
@@ -476,7 +490,7 @@ TOOL = {
             },
             "url": {
                 "type": "STRING",
-                "description": "Video URL for get_info action"
+                "description": "Video URL for get_info and summarize"
             }
         },
         "required": []

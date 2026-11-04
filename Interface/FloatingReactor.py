@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import getpass
 import json
+import sys
 import time
 
 from PyQt6.QtCore import QPoint, QPointF, QRectF, Qt, QTimer
@@ -54,17 +55,59 @@ def Save(**kw) -> None:
 
 # ── One copy of Orion ─────────────────────────────────────────────────────────
 
+_MUTEXES = []              # held for the life of the process; Windows frees them when it ends
+
+
+def _TakeMutex():
+    """True: this is the only Orion (the named mutex is ours now). False: another
+    Orion holds it, even one still starting up. None: no mutex here (not Windows,
+    or it failed), so only the socket decides."""
+    if sys.platform != "win32":
+        return None
+    try:
+        import ctypes
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.CreateMutexW.restype = ctypes.c_void_p
+        handle = kernel32.CreateMutexW(None, False, "Local\\" + SERVER_NAME)
+        if not handle:
+            return None
+        if ctypes.get_last_error() == 183:           # ERROR_ALREADY_EXISTS
+            kernel32.CloseHandle(ctypes.c_void_p(handle))
+            return False
+        _MUTEXES.append(handle)
+        return True
+    except Exception as e:
+        print(f"[Floating] single-copy mutex off: {e}")
+        return None
+
+
+def _Summon(QLocalSocket, tries: int) -> bool:
+    for _ in range(tries):
+        probe = QLocalSocket()
+        probe.connectToServer(SERVER_NAME)
+        if probe.waitForConnected(300):
+            probe.write(b"show")
+            probe.flush()
+            probe.waitForBytesWritten(300)
+            probe.disconnectFromServer()
+            return True
+        time.sleep(0.2)
+    return False
+
+
 def ClaimSingleInstance():
     """A listening QLocalServer when this is the only Orion, else None (the
-    running one has been asked to show itself)."""
+    running one has been asked to show itself). A named mutex, taken first,
+    decides: a second listen() on the same name succeeds on Windows, so the
+    socket alone let two quick launches both run."""
     from PyQt6.QtNetwork import QLocalServer, QLocalSocket
-    probe = QLocalSocket()
-    probe.connectToServer(SERVER_NAME)
-    if probe.waitForConnected(300):
-        probe.write(b"show")
-        probe.flush()
-        probe.waitForBytesWritten(300)
-        probe.disconnectFromServer()
+    mine = _TakeMutex()
+    if mine is False:
+        # The other one may still be starting: give its socket a few seconds.
+        if not _Summon(QLocalSocket, 10):
+            print("[Floating] another Orion is starting; this one bows out.")
+        return None
+    if mine is None and _Summon(QLocalSocket, 1):
         return None
     QLocalServer.removeServer(SERVER_NAME)      # a stale name from a crash
     server = QLocalServer()

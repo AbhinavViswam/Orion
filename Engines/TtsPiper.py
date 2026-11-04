@@ -109,6 +109,8 @@ _catalog: Optional[dict] = None
 _catalog_lock = threading.Lock()
 _voices: dict = {}          # model path -> loaded PiperVoice
 _voice_lock = threading.Lock()
+_download_locks: dict[str, threading.Lock] = {}
+_download_locks_guard = threading.Lock()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -208,7 +210,9 @@ def FetchFile(url: str, target: Path, timeout: float = 30.0) -> None:
     import shutil
     from urllib.request import urlopen
 
-    part = target.with_name(target.name + ".part")
+    # One temp file per download: two fetches of the same voice must never
+    # write into the same .part and move a mix of both into place.
+    part = target.with_name(f"{target.name}.{os.getpid()}-{threading.get_ident()}.part")
     try:
         with urlopen(url, timeout=timeout) as response, open(part, "wb") as out:
             shutil.copyfileobj(response, out)
@@ -222,8 +226,19 @@ def FetchFile(url: str, target: Path, timeout: float = 30.0) -> None:
             pass
 
 
+def _DownloadLock(voice: str) -> threading.Lock:
+    with _download_locks_guard:
+        return _download_locks.setdefault(voice, threading.Lock())
+
+
 def download(voice: str, log=None) -> Path:
-    """Fetch one voice. Blocking — callers run it off the interface thread."""
+    """Fetch one voice. Blocking — callers run it off the interface thread.
+    One download per voice at a time: a second caller waits, then finds it done."""
+    with _DownloadLock(voice):
+        return _Download(voice, log)
+
+
+def _Download(voice: str, log=None) -> Path:
     from piper.download_voices import URL_FORMAT, VOICE_PATTERN
 
     _VOICE_DIR.mkdir(parents=True, exist_ok=True)

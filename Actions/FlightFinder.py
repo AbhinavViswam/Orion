@@ -5,6 +5,7 @@ import subprocess
 import sys
 from datetime import datetime, timedelta
 from pathlib import Path
+from urllib.parse import quote_plus
 
 from Config import IsWindows, IsMac, IsLinux
 
@@ -103,16 +104,16 @@ def BuildGoogleFlightsUrl(
     cabin_code = _CABIN_CODE.get(cabin.lower(), "1")
     base       = "https://www.google.com/travel/flights"
 
-    # Google Flights accepts these query params for pre-filling
+    # Google Flights pre-fills from the q text. (A fixed `tfs=` used to sit
+    # here: it encodes IST -> LHR on 2025-03-15 and overrode every search.)
     if return_date:
-        trip = f"Flights+from+{origin}+to+{destination}+on+{date}+returning+{return_date}"
+        trip = f"Flights from {origin} to {destination} on {date} returning {return_date}"
     else:
-        trip = f"Flights+from+{origin}+to+{destination}+on+{date}"
+        trip = f"Flights from {origin} to {destination} on {date}"
 
     return (
         f"{base}"
-        f"?q={trip}"
-        f"&tfs=CBwQAhoeEgoyMDI1LTAzLTE1agcIARIDSVNUcgcIARIDTEhS"   
+        f"?q={quote_plus(trip)}"
         f"&curr=USD"
         f"&cabin={cabin_code}"
         f"&adults={passengers}"

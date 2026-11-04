@@ -335,13 +335,17 @@ class Together:
         if state in ("ringing", "in_call"):
             if getattr(self.live, "_is_speaking", False):
                 self.live.interrupt()
-            if not ui.muted:
-                who = str(ev.get("caller") or "").strip()
-                ui.SetMicMuted(True, f"Phone call{' — ' + who if who else ''}")
+            # Muted already by Orion itself (left home) counts as Orion's mute too: both reasons are kept, and
+            # the mic opens again only when neither is left.
+            if not ui.muted or self.home_muted:
+                if not ui.muted:
+                    who = str(ev.get("caller") or "").strip()
+                    ui.SetMicMuted(True, f"Phone call{' — ' + who if who else ''}")
                 self.call_muted = True
         elif state == "idle" and self.call_muted:
             self.call_muted = False
-            ui.SetMicMuted(False, "")
+            if not self.home_muted:
+                ui.SetMicMuted(False, "")
 
     # D4
     def On_briefing_done(self, ev) -> None:
@@ -423,13 +427,15 @@ class Together:
         ui = self.live.ui
         if not ev.get("at_home"):
             self.left_home_at = time.time()
-            if not ui.muted and PhoneBridge.IdleSeconds() >= AWAY_FOR_HOME_S:
-                ui.SetMicMuted(True, "You left home")
+            if (not ui.muted or self.call_muted) and PhoneBridge.IdleSeconds() >= AWAY_FOR_HOME_S:
+                if not ui.muted:
+                    ui.SetMicMuted(True, "You left home")
                 self.home_muted = True
             return
         if self.home_muted:
             self.home_muted = False
-            ui.SetMicMuted(False, "")
+            if not self.call_muted:
+                ui.SetMicMuted(False, "")
         # Back home: they greet each other once you're at the laptop (it waits up to 3 hours for that). Only after
         # Orion saw the phone leave: JARVIS says "at home" each time it starts too.
         if self.talk is not None and self.left_home_at:

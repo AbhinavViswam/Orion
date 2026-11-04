@@ -170,12 +170,23 @@ def Stage(source: str, find: str, replace: str, line: int) -> Optional[str]:
         return None
     spots = [m.start() for m in re.finditer(re.escape(find), source)]
     if not spots:
-        loose = "\n".join(l.rstrip() for l in source.split("\n"))
+        lines = source.split("\n")
+        loose = "\n".join(l.rstrip() for l in lines)
         want = "\n".join(l.rstrip() for l in find.split("\n"))
-        if loose.count(want) != 1:
+        if not want.strip() or loose.count(want) != 1:
             return None
-        source, find = loose, want
-        spots = [source.find(find)]
+        # Only the matched span changes: the rest of the file keeps its trailing spaces, so a one-line
+        # repair stays a one-line change.
+        starts, pos = [], 0
+        for l in lines:
+            starts.append(pos)
+            pos += len(l) + 1
+
+        def Orig(i: int) -> int:
+            row = loose.count("\n", 0, i)
+            return starts[row] + i - (loose.rfind("\n", 0, i) + 1)
+        a = loose.find(want)
+        return source[:Orig(a)] + replace + source[Orig(a + len(want)):]
     at = min(spots, key=lambda s: abs(source.count("\n", 0, s) + 1 - line))
     return source[:at] + replace + source[at + len(find):]
 
@@ -306,7 +317,13 @@ def Apply(fix: Fix, import_check: Callable[[str], Optional[str]] = ImportProblem
     REPAIR_DIR.mkdir(parents=True, exist_ok=True)
     backup = REPAIR_DIR / f"{path.stem}.{time.strftime('%Y%m%d-%H%M%S')}.bak.py"
     shutil.copy2(path, backup)
-    path.write_text(fix.new_source, encoding="utf-8")
+    # Written with the file's own line endings: read_text gave "\n" for each, and a plain write_text would turn
+    # every one into Windows' "\r\n", so a one-line fix to an LF file would change the whole file.
+    try:
+        crlf = b"\r\n" in path.read_bytes()
+    except OSError:
+        crlf = False
+    path.write_text(fix.new_source, encoding="utf-8", newline="\r\n" if crlf else "\n")
     problem = import_check(rel)
     if problem:
         shutil.copy2(backup, path)

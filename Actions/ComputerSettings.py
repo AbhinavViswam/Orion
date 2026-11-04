@@ -83,13 +83,48 @@ def VolumeDown():
             capture_output=True)
 
 def VolumeMute():
+    """Toggle mute (toggle_mute)."""
+    MuteSet(None)
+
+
+def MuteGet() -> bool | None:
+    """Is the output muted? None when this system will not say."""
+    try:
+        if _OS == "Windows":
+            return bool(WinEndpointVolume().GetMute())
+        if _OS == "Darwin":
+            r = subprocess.run(["osascript", "-e", "output muted of (get volume settings)"],
+                               capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=5)
+            return r.stdout.strip().lower() == "true"
+        r = subprocess.run(["pactl", "get-sink-mute", "@DEFAULT_SINK@"],
+                           capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=5)
+        return "yes" in r.stdout.lower() if r.stdout.strip() else None
+    except Exception:
+        return None
+
+
+def MuteSet(state: bool | None) -> None:
+    """True mutes, False unmutes, None toggles. "unmute" used to toggle like
+    "mute", so saying it on an unmuted PC muted it."""
     if _OS == "Windows":
-        pyautogui.press("volumemute")
+        try:
+            ep = WinEndpointVolume()
+            ep.SetMute(int(not ep.GetMute()) if state is None else int(state), None)
+            return
+        except Exception as e:
+            print(f"[Settings] pycaw mute failed, using the mute key: {e}")
+            now = MuteGet()
+            if state is None or now is None or now != state:
+                pyautogui.press("volumemute")
     elif _OS == "Darwin":
-        subprocess.run(["osascript", "-e", "set volume with output muted"],
+        if state is None:
+            state = not bool(MuteGet())
+        subprocess.run(["osascript", "-e",
+                        f"set volume {'with' if state else 'without'} output muted"],
             capture_output=True)
     else:
-        subprocess.run(["pactl", "set-sink-mute", "@DEFAULT_SINK@", "toggle"],
+        arg = "toggle" if state is None else ("1" if state else "0")
+        subprocess.run(["pactl", "set-sink-mute", "@DEFAULT_SINK@", arg],
             capture_output=True)
 
 
@@ -497,9 +532,19 @@ def TypeText(text: str, press_enter_after: bool = False):
     if not text:
         return
     if _PYPERCLIP:
+        try:
+            saved = pyperclip.paste()
+        except Exception:
+            saved = None
         pyperclip.copy(str(text))
         time.sleep(0.15)
         paste()
+        if saved is not None:        # give the user's clipboard back
+            time.sleep(0.3)
+            try:
+                pyperclip.copy(saved)
+            except Exception:
+                pass
     else:
         pyautogui.write(str(text), interval=0.03)
     if press_enter_after:
@@ -665,8 +710,8 @@ def ShutdownComputer():
 ACTION_MAP: dict[str, callable] = {
     "volume_up":           VolumeUp,
     "volume_down":         VolumeDown,
-    "mute":                VolumeMute,
-    "unmute":              VolumeMute,
+    "mute":                lambda: MuteSet(True),
+    "unmute":              lambda: MuteSet(False),
     "toggle_mute":         VolumeMute,
     "brightness_up":       BrightnessUp,
     "brightness_down":     BrightnessDown,
@@ -750,6 +795,10 @@ _IRREVERSIBLE = {
     "toggle_wifi": ("Switch WiFi off or on",
                     "If this switches WiFi off, ORION loses its connection and "
                     "cannot switch it back on by voice."),
+    # The Run box runs whatever is typed into it next ("shutdown /s"), which
+    # walked straight around the two confirmations above.
+    "open_run":    ("Open the Run box",
+                    "Whatever is typed into it next runs as a command."),
 }
 
 # Kept so anything still importing the old name keeps working.
@@ -980,7 +1029,9 @@ def computer_settings(
     # tell us the current value, nothing is registered — an undo that restores
     # a guess is worse than no undo at all.
     _before = None
-    if action in ("volume_up", "volume_down", "mute", "unmute", "toggle_mute"):
+    if action in ("mute", "unmute", "toggle_mute"):
+        _before = ("mute", MuteGet())
+    elif action in ("volume_up", "volume_down"):
         _before = ("volume", VolumeGet())
     elif action in ("brightness_up", "brightness_down"):
         _before = ("brightness", BrightnessGet())
@@ -995,7 +1046,10 @@ def computer_settings(
     if _before:
         kind, old = _before
         if old is not None:
-            if kind == "volume":
+            if kind == "mute":
+                PushUndo(f"sound ({action})",
+                          lambda b=old: (MuteSet(b), "Sound muted again." if b else "Sound back on.")[1])
+            elif kind == "volume":
                 PushUndo(f"volume ({action})",
                           lambda b=old: (VolumeSet(b), f"Volume back to {b}%.")[1])
             elif kind == "brightness":
@@ -1028,6 +1082,19 @@ def computer_settings(
     #     actually done. `open_app` lied because it reported an application
     #     opening from a shell starting — two different events. Reporting a
     #     keystroke as a keystroke is not that.
+    if _before and _before[0] == "mute":
+        now = MuteGet()
+        want = {"mute": True, "unmute": False}.get(action, None if _before[1] is None else not _before[1])
+        if now is None or want is None:
+            return Outcome.unverified("computer_settings",
+                                      "this system does not report whether it is muted",
+                                      wanted=action)
+        if now != want:
+            return Outcome.unverified("computer_settings",
+                                      f"the sound still reads {'muted' if now else 'on'}",
+                                      wanted=action)
+        return Outcome.done("computer_settings", wanted=action, muted=now, verified=True)
+
     if _before:
         kind, old_value = _before
         now = VolumeGet() if kind == "volume" else BrightnessGet()

@@ -65,7 +65,9 @@ _BANNED_IMPORTS = {
 # Builtins that run code or reach any object's insides: banned wherever they appear, called or not.
 _BANNED_NAMES = {"eval", "exec", "compile", "__import__", "globals", "locals", "vars", "getattr", "setattr",
                  "delattr", "breakpoint", "input", "memoryview", "__builtins__", "__loader__", "__spec__",
-                 "__file__"}
+                 "__file__",
+                 # a path or command spelled out one character / byte at a time slips past the text checks
+                 "chr"}
 # Exact functions, after `import x as y` / `from x import y` are resolved.
 _BANNED_CALLS = {
     "os.system", "os.popen", "os.startfile", "os.kill", "os.killpg", "os.remove", "os.unlink", "os.rmdir",
@@ -88,7 +90,8 @@ _BANNED_ATTRS = {"startfile", "unlink", "rmdir", "removedirs", "rmtree", "rename
                  "lchmod", "kill", "symlink_to", "hardlink_to",
                  # frames and code objects: the way from any object back to every module
                  "f_globals", "f_locals", "f_builtins", "f_back", "tb_frame", "gi_frame", "cr_frame", "ag_frame",
-                 "gi_code", "cr_code", "co_code"}
+                 "gi_code", "cr_code", "co_code",
+                 "fromhex"}
 # list.remove, str.replace and platform.system are everywhere: banned only when the owner is os / shutil.
 _ATTR_NEEDS_MODULE = {"remove": {"os"}, "replace": {"os"}, "move": {"shutil"}, "system": {"os"},
                       "popen": {"os"}}
@@ -101,9 +104,15 @@ _DUNDERS_OK = {"__name__", "__init__", "__str__", "__repr__", "__eq__", "__ne__"
                "__ge__", "__hash__", "__len__", "__iter__", "__next__", "__enter__", "__exit__", "__doc__",
                "__main__", "__post_init__", "__contains__", "__bool__", "__all__", "__version__"}
 _BANNED_TEXT = ("apikeys.json", "api_keys.json", "longterm.json", "phonelink.json", "telegram.json",
-                "settings.json", "login data", ".ssh", "system32", "format c:", "wallet.dat", "keychain", ".venv")
+                "settings.json", "login data", ".ssh", "system32", "format c:", "wallet.dat", "keychain", ".venv",
+                # where a dropped file runs by itself (the Startup folder), and files that are programs
+                "start menu", "shell:startup", ".bat", ".cmd", ".vbs", ".ps1", ".lnk", ".exe", ".dll", ".pyw")
 _CONFIG_DIR = re.compile(r"(^|[\\/])config([\\/]|$)", re.IGNORECASE)   # Orion's Config folder, however written
 _FIRST_PARTY_OK = {"Brain.Gemini", "Brain"}       # `from Brain import Gemini`
+# The content panel shows this much (Interface/Window.py ShowContent): a skill is only offered when all of its
+# code fits, so the yes is never given to code that was cut off.
+SHOW_MAX = 4000
+CODE_MAX = 3200                 # the rest of the panel is the summary and the note above the code
 _NETWORK = {"requests", "urllib", "http", "socket", "aiohttp", "httpx", "websocket", "websockets"}
 
 
@@ -375,6 +384,7 @@ A plugin is ONE Python file:
   It returns ONE short sentence (or a few lines) that will be spoken. Use parameters.get() with
   sensible defaults: it must work when called with only the example parameters.
 - Catch your own errors and return a friendly sentence instead of raising.
+- Keep the whole file short (under 3000 characters): the user reads all of it before saying yes.
 Rules:
 - Standard library, plus only these installed packages if needed: requests, PIL, bs4. No API keys:
   use free public endpoints that need none, with timeout=10.
@@ -455,6 +465,8 @@ def Draft(goal: str, name: str = "", taken: set[str] = frozenset(),
             scan = ScanCode(code, skill_name)
             if not scan.ok:
                 why = "; ".join(scan.problems[:4])
+            elif len(code) > CODE_MAX:
+                why = f"the file is {len(code)} characters long: keep the whole file under {CODE_MAX}"
             else:
                 example = reply.get("example") if isinstance(reply.get("example"), dict) else {}
                 passed, answer = test(code, example) if test is not None else (True, "")
@@ -593,9 +605,13 @@ def Run(args: dict, registry, show: Callable[[str, str], None], say: Callable[[s
                 Told(skill)
                 return
             uses = f" Uses {', '.join(skill.uses)}." if skill.uses else ""
-            show(f"NEW SKILL — {skill.name}",
-                 f"{skill.summary}{uses}\nNot run yet: on your yes it is test-run once, and added only "
-                 f"if that works.\n\n{skill.code}")
+            shown = (f"{skill.summary}{uses}\nNot run yet: on your yes it is test-run once, and added only "
+                     f"if that works.\n\n{skill.code}")
+            if len(shown) > SHOW_MAX:
+                Told(f"The skill {skill.name} came out too long to show in full on screen, so I didn't offer "
+                     f"it. Ask for something smaller.")
+                return
+            show(f"NEW SKILL — {skill.name}", shown)
             said = Confirm.request("skill_forge", f"Add the skill '{skill.name}'?",
                                    f"{skill.summary}{uses} The code is in the panel below. Confirm to "
                                    f"test-run it and add it.",
