@@ -239,8 +239,13 @@ def SetWallpaperFromUrl(url: str) -> str:
     try:
         import urllib.request
         suffix = Path(url.split("?")[0]).suffix or ".jpg"
+        if not url.lower().startswith(("http://", "https://")):
+            return Outcome.failed("set_wallpaper",
+                                  "only http and https image links can be used", url=url)
         tmp    = Path(tempfile.mktemp(suffix=suffix))
-        urllib.request.urlretrieve(url, str(tmp))
+        # A deadline: urlretrieve could hang forever on a stalled server.
+        with urllib.request.urlopen(url, timeout=30) as resp:
+            tmp.write_bytes(resp.read(50 * 1024 * 1024))
         result = SetWallpaper(str(tmp))
         try:
             tmp.unlink()
@@ -305,12 +310,40 @@ _SKIP_EXTENSIONS = {
 }
 
 
+def _PushMovesUndo(label: str, journal: list) -> None:
+    """One undo that puts every moved file back, then drops folders left empty."""
+    if not journal:
+        return
+    from Brain.Undo import PushUndo
+
+    def UndoMoves(entries=tuple(journal)):
+        restored = 0
+        for origin, moved_to in entries:
+            try:
+                if moved_to.exists() and not origin.exists():
+                    origin.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.move(str(moved_to), str(origin))
+                    restored += 1
+            except Exception as e:
+                print(f"[Desktop] undo: {moved_to.name}: {e}")
+        for folder in {m.parent for _o, m in entries}:
+            try:
+                if folder.is_dir() and not any(folder.iterdir()):
+                    folder.rmdir()
+            except Exception:
+                pass
+        return f"{restored} file(s) put back on the desktop."
+
+    PushUndo(label, UndoMoves)
+
+
 def OrganizeDesktop(mode: str = "by_type") -> str:
     desktop       = GetDesktop()
     skip_exts     = _SKIP_EXTENSIONS.get(_OS, set())
     moved, skipped = [], []
+    journal = []
 
-    for item in desktop.iterdir():
+    for item in list(desktop.iterdir()):
         if item.is_dir() or item.name.startswith("."):
             continue
         if item.suffix.lower() in skip_exts:
@@ -335,8 +368,12 @@ def OrganizeDesktop(mode: str = "by_type") -> str:
             skipped.append(item.name)
             continue
 
+        origin = item.resolve()
         shutil.move(str(item), str(new_path))
+        journal.append((origin, new_path.resolve()))
         moved.append(f"{item.name} → {folder_name}/")
+
+    _PushMovesUndo(f"organized the desktop ({len(journal)} files)", journal)
 
     result = f"Desktop organized ({mode}): {len(moved)} files moved."
     if moved:
@@ -381,15 +418,25 @@ def CleanDesktop() -> str:
     archive_dir.mkdir(exist_ok=True)
 
     moved = 0
-    for item in desktop.iterdir():
+    journal = []
+    for item in list(desktop.iterdir()):
         if item.is_dir() or item.name.startswith("."):
             continue
         if item.suffix.lower() in skip_exts:
             continue
         new_path = archive_dir / item.name
         if not new_path.exists():
+            origin = item.resolve()
             shutil.move(str(item), str(new_path))
+            journal.append((origin, new_path.resolve()))
             moved += 1
+
+    if not journal:
+        try:
+            archive_dir.rmdir()          # don't leave an empty archive behind
+        except Exception:
+            pass
+    _PushMovesUndo(f"cleaned the desktop ({moved} files)", journal)
 
     return f"Desktop cleaned: {moved} files archived to '{archive_dir.name}'."
 

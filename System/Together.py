@@ -43,6 +43,9 @@ LOW_BATTERY = 15
 GOODNIGHT = re.compile(r"\bgood\s*night\b|\bgoodnite\b|\bnight night\b", re.I)
 
 _lock = threading.Lock()
+# One lock for the whole read-modify-write of memory + sync state (Merge, OfferChanges, SetState), so neither
+# loses the other's update or echoes the phone's news back to it.
+_sync_lock = threading.RLock()
 
 
 def Speakable(items: list[dict]) -> tuple[list, int]:
@@ -92,9 +95,10 @@ def State() -> dict:
 
 
 def SetState(**kw) -> None:
-    d = State()
-    d.update(kw)
-    _Save(SYNC_FILE, d)
+    with _sync_lock:               # read and write as one, so two writers don't drop each other's keys
+        d = State()
+        d.update(kw)
+        _Save(SYNC_FILE, d)
 
 
 def Today() -> str:
@@ -198,6 +202,14 @@ def _Close(a: str, b: str) -> bool:
 
 def Merge(items: list[dict]) -> int:
     """What the phone sent, merged into Orion's memory. Returns how many entries changed."""
+    from Brain import Memory
+    # Memory's lock too, so Orion's own remember/forget can't land between our load and save.
+    # Order is always sync lock, then memory lock (Brain never takes the sync lock).
+    with _sync_lock, Memory._lock:
+        return _Merge(items)
+
+
+def _Merge(items: list[dict]) -> int:
     from Brain.Memory import EntryValue, LoadMemory, SaveMemory
     memory = LoadMemory()
     st = State()
@@ -492,8 +504,9 @@ class Together:
             self.OfferPrivacy(now=True)
             if On("memory"):
                 self.send("memory_request")
-                items = MemoryItems()
-                self._offered = {f"{i['category']}/{NormKey(i['key'])}": i["value"] for i in items}
+                with _sync_lock:
+                    items = MemoryItems()
+                    self._offered = {f"{i['category']}/{NormKey(i['key'])}": i["value"] for i in items}
                 self.send("memory_offer", items=items + Tombstones(), first=True)
         self.RunLater(Run)
 
@@ -502,8 +515,9 @@ class Together:
         threading.Thread(target=fn, name="Together-connect", daemon=True).start()
 
     def OfferAll(self) -> None:
-        items = MemoryItems()
-        self._offered = {f"{i['category']}/{NormKey(i['key'])}": i["value"] for i in items}
+        with _sync_lock:
+            items = MemoryItems()
+            self._offered = {f"{i['category']}/{NormKey(i['key'])}": i["value"] for i in items}
         self.SendLater("memory_offer", items=items + Tombstones(), first=True)
 
     def SyncNow(self) -> str:
@@ -518,26 +532,28 @@ class Together:
         the phone). The first look only remembers what's there."""
         if not On("memory"):
             return 0
-        st = State()
-        from_phone, stamps, tombs = st.get("from_phone", {}), st.get("stamps", {}), st.get("tombstones", {})
-        now = {f"{i['category']}/{NormKey(i['key'])}": i for i in MemoryItems()}
-        if not self._offered:
+        from Brain import Memory
+        with _sync_lock, Memory._lock:
+            st = State()
+            from_phone, stamps, tombs = st.get("from_phone", {}), st.get("stamps", {}), st.get("tombstones", {})
+            now = {f"{i['category']}/{NormKey(i['key'])}": i for i in MemoryItems()}
+            if not self._offered:
+                self._offered = {k: i["value"] for k, i in now.items()}
+                return 0
+            fresh = []
+            for k, it in now.items():
+                if self._offered.get(k) != it["value"] and from_phone.get(k) != it["value"]:
+                    stamps[k] = Now()
+                    fresh.append({**it, "updated": stamps[k], "source": "orion"})
+            for k in [k for k in self._offered if k not in now]:
+                if from_phone.get(k, "") is not None:  # not a deletion that came from the phone
+                    tombs[k] = Now()
+                    cat, _, key = k.partition("/")
+                    fresh.append({"category": cat, "key": key, "value": "", "updated": tombs[k], "deleted": True,
+                                  "source": "orion"})
+                stamps.pop(k, None)
             self._offered = {k: i["value"] for k, i in now.items()}
-            return 0
-        fresh = []
-        for k, it in now.items():
-            if self._offered.get(k) != it["value"] and from_phone.get(k) != it["value"]:
-                stamps[k] = Now()
-                fresh.append({**it, "updated": stamps[k], "source": "orion"})
-        for k in [k for k in self._offered if k not in now]:
-            if from_phone.get(k, "") is not None:  # not a deletion that came from the phone
-                tombs[k] = Now()
-                cat, _, key = k.partition("/")
-                fresh.append({"category": cat, "key": key, "value": "", "updated": tombs[k], "deleted": True,
-                              "source": "orion"})
-            stamps.pop(k, None)
-        self._offered = {k: i["value"] for k, i in now.items()}
-        SetState(stamps=stamps, tombstones=tombs)
+            SetState(stamps=stamps, tombstones=tombs)
         if fresh:
             self.SendLater("memory_offer", items=fresh, first=False)
             pairs, hidden = Speakable([i for i in fresh if not i.get("deleted")])

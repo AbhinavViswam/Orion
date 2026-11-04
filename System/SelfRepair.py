@@ -49,6 +49,9 @@ HISTORY_FILE = REPAIR_DIR / "History.json"
 PROTECTED = {
     "System/SelfRepair.py", "System/SkillForge.py", "Brain/Confirm.py", "Brain/Undo.py",
     "Setup.py", "System/Installer.py", "Tests/RunAll.py",
+    # Security: a crafted traceback must never get a "fix" offered to what guards privacy and remote access.
+    "Brain/Privacy.py", "System/TelegramLink.py", "System/TelegramApi.py", "System/TelegramRules.py",
+    "System/PhoneBridge.py", "System/PhoneTasks.py", "System/PluginLoader.py", "Brain/Settings.py",
 }
 _SKIP_PARTS = {".venv", "site-packages", "Tests", "__pycache__", "Config"}
 MAX_CHANGE_LINES = 40          # a "fix" bigger than this is a rewrite, not a repair
@@ -266,7 +269,8 @@ def ImportProblem(rel: str) -> Optional[str]:
                            capture_output=True, text=True, encoding="utf-8", errors="replace",
                            timeout=IMPORT_TIMEOUT)
     except subprocess.TimeoutExpired:
-        return None          # slow to import is not broken
+        # Not proven fine: a fix that hangs on import must not stay in.
+        return f"importing it took longer than {IMPORT_TIMEOUT} seconds"
     except OSError as e:
         return f"couldn't start Python: {e}"
     if r.returncode == 0:
@@ -372,7 +376,15 @@ def Run(args: dict, show: Callable[[str, str], None], say: Callable[[str], None]
         return "Recent repairs, newest first:\n" + "\n".join(
             f"- {e['file']} line {e['line']}: {e['explanation']} ({e['status']})" for e in items)
     if action in ("rollback", "undo", "revert"):
-        return RollBack(str(args.get("id", "") or ""))
+        # It rewrites one of Orion's files, so it asks on the banner first.
+        if not any(e.get("status") == "applied" for e in _LoadHistory()):
+            return "There's no repair to take back."
+        from Brain import Confirm
+        rid = str(args.get("id", "") or "")
+        return Confirm.request("self_repair_rollback", "Take back the last repair?" if not rid
+                               else f"Take back repair {rid}?",
+                               "The repaired file goes back to how it was before the fix.",
+                               lambda r=rid: RollBack(r))
 
     tb, notes = str(args.get("error", "") or ""), str(args.get("notes", "") or "")
     if not (tb or LastFailure().get("traceback")):
@@ -383,16 +395,19 @@ def Run(args: dict, show: Callable[[str, str], None], say: Callable[[str], None]
         return result
 
     def Work():
-        from Brain import Confirm
-        fix = draft(tb, notes)
-        if isinstance(fix, str):
-            say(f"[SELF_REPAIR] {fix} Tell the user that in one short sentence.")
-            return
-        show(f"FIX — {fix.place.rel}", f"{fix.explanation}\n\n{fix.Diff()}")
-        said = Confirm.request("self_repair", f"Apply a fix to {fix.place.path.name}?",
-                               f"{fix.explanation} The change is in the panel below.",
-                               lambda f=fix: Told(Apply(f)))
-        say(f"[SELF_REPAIR] A fix is ready: {fix.explanation} {said}")
+        try:
+            from Brain import Confirm
+            fix = draft(tb, notes)
+            if isinstance(fix, str):
+                say(f"[SELF_REPAIR] {fix} Tell the user that in one short sentence.")
+                return
+            show(f"FIX — {fix.place.rel}", f"{fix.explanation}\n\n{fix.Diff()}")
+            said = Confirm.request("self_repair", f"Apply a fix to {fix.place.path.name}?",
+                                   f"{fix.explanation} The change is in the panel below.",
+                                   lambda f=fix: Told(Apply(f)))
+            say(f"[SELF_REPAIR] A fix is ready: {fix.explanation} {said}")
+        except Exception as e:
+            Told(f"Working out the fix failed: {e}")
 
     threading.Thread(target=Work, daemon=True, name="self-repair").start()
     return ("Working out a fix now. It can take up to a minute; I'll put it on screen to confirm. "

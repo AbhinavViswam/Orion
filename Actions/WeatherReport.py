@@ -61,6 +61,10 @@ TOOL = {
             "city": {
                 "type": "STRING",
                 "description": "City name"
+            },
+            "time": {
+                "type": "STRING",
+                "description": "When: today, tomorrow, this weekend, a date (default: today)"
             }
         },
         "required": [

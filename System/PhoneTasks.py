@@ -37,7 +37,9 @@ MAX_RUNNING = 2
 MAX_FILE_BYTES = 15 * 1024 * 1024
 # Tools that only make sense in the live voice session, or would act on the phone link itself.
 # ask_phone too: a request from the phone must never make Orion ask the phone back (one hop).
-NOT_FOR_PHONE = {"screen_process", "close_camera", "shutdown_orion", "call_secretary", "ask_phone"}
+# skill_forge / self_repair write Orion's own code: only from the laptop itself (also Telegram, which uses this).
+NOT_FOR_PHONE = {"screen_process", "close_camera", "shutdown_orion", "call_secretary", "ask_phone",
+                 "skill_forge", "self_repair"}
 # Phone task actions (Plugins/AskPhone.py ACTIONS) whose answers private mode keeps from Gemini.
 PRIVATE_PHONE_ACTIONS = {"notifications", "goal", "where"}
 

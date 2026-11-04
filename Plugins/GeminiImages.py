@@ -131,11 +131,27 @@ def _load_jobs(folder: Path, only: str, redo: bool, subfolder: str = ""):
         wanted = {w.strip().upper() for w in only.replace(",", " ").split() if w.strip()}
         jobs = [j for j in jobs if str(j.get("id", "")).upper() in wanted]
     images_dir = folder / "images"
-    out_dir = images_dir / subfolder if subfolder else images_dir
+    out_dir = images_dir
+    if subfolder:
+        # Stays inside images/: no "..", no drive or absolute path.
+        out_dir = (images_dir / subfolder).resolve()
+        if not out_dir.is_relative_to(images_dir.resolve()) or ".." in Path(subfolder).parts:
+            raise ValueError(f"The subfolder {subfolder!r} must be a folder inside images/.")
+    for j in jobs:
+        j["name"] = _SafeName(j.get("name"))
+    jobs = [j for j in jobs if j["name"]]
     if not redo:
         done = _existing_names(images_dir)
         jobs = [j for j in jobs if j["name"] not in done]
     return jobs, out_dir
+
+
+def _SafeName(name) -> str:
+    """A job's name as a plain file name: no folders, no characters Windows refuses."""
+    name = Path(str(name or "")).name.strip()
+    for bad in '<>:"/\\|?*':
+        name = name.replace(bad, "_")
+    return "" if name in ("", ".", "..") else name
 
 
 def _save_square(img_bytes: bytes, path: Path):
@@ -285,6 +301,15 @@ async def _run_batch(jobs, out_dir: Path, player):
     from playwright.async_api import async_playwright
 
     proc = _start_chrome()
+    try:
+        await _run_jobs(jobs, out_dir, player, async_playwright)
+    finally:
+        # The Chrome this run started (with its debug port) is closed whatever happened.
+        if proc and proc.poll() is None:
+            proc.terminate()
+
+
+async def _run_jobs(jobs, out_dir: Path, player, async_playwright):
     fails_in_a_row = 0
     async with async_playwright() as pw:
         browser = await pw.chromium.connect_over_cdp(f"http://127.0.0.1:{DEBUG_PORT}")
@@ -347,8 +372,6 @@ async def _run_batch(jobs, out_dir: Path, player):
             await browser.close()
         except Exception:
             pass
-    if proc and proc.poll() is None:
-        proc.terminate()
 
 
 def _worker(jobs, out_dir, player):

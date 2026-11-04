@@ -523,6 +523,8 @@ class Secretary:
         Mute = getattr(player, "SetMicMuted", None) or (lambda *a: None)
         Log = getattr(player, "WriteLog", None) or (lambda *a: None)
         reopen = not was_muted
+        answered = hung = False
+        banner = ""
         try:
             self.pause(1.5)                       # let the model's last word finish
             Mute(True, "The call secretary is on a WhatsApp call.")
@@ -530,6 +532,7 @@ class Secretary:
                 say(f"[CALL_SECRETARY] I couldn't press Accept in WhatsApp, so the call from "
                     f"{ringing.caller} wasn't answered. Tell the user in one sentence.")
                 return
+            answered = True
             self.pause(1.5)                       # the call connecting
             Log(f"SYS: Taking a message from {ringing.caller} on WhatsApp.")
             banner = self._OfferTakeOver(ringing.caller)
@@ -547,14 +550,25 @@ class Secretary:
                 reopen = reopen and self._WaitForEnd()
             else:
                 self.sound.Say(cfg["goodbye"])
+                hung = True
                 if not self.calls.HangUp():
                     Log("SYS: I couldn't find WhatsApp's End call button; the caller may have hung up already.")
                 self._DropBanner(banner)
             self._Report(ringing.caller, pcm, rate, cfg, player, say)
         except Exception as e:
             Log(f"ERR: Call secretary — {e}")
+            # Never leave the call live with Orion's mic about to open: hang up first.
+            if answered and not hung and not self.took_over:
+                try:
+                    self.calls.HangUp()
+                except Exception:
+                    pass
             say(f"[CALL_SECRETARY] Taking the message failed: {e}. Tell the user in one sentence.")
         finally:
+            try:
+                self._DropBanner(banner)
+            except Exception:
+                pass
             if reopen:
                 Mute(False, "The call is over.")
             self.busy.release()

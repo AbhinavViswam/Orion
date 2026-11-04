@@ -84,6 +84,48 @@ def _SaveFile(path: Path, content: str) -> str:
         return f"Could not save: {e}"
 
 
+def _SaveWithUndo(path: Path, content: str, label: str) -> str:
+    """Save over a file, keeping a .bak copy and an undo of the old contents."""
+    previous = None
+    try:
+        if path.exists():
+            previous = path.read_text(encoding="utf-8")
+            try:
+                path.with_name(path.name + ".bak").write_text(previous, encoding="utf-8")
+            except Exception as e:
+                print(f"[Code] backup failed: {e}")
+    except Exception as e:
+        return f"Could not read the old file, so I left it alone: {e}"
+    status = _SaveFile(path, content)
+    if status.startswith("Saved"):
+        try:
+            from Brain.Undo import PushUndo
+            from Actions.FileController import UndoWrite
+            PushUndo(f"{label} {path.name}", UndoWrite(path, previous))
+        except Exception as e:
+            print(f"[Code] undo push failed: {e}")
+        if previous is not None:
+            status += f" (old version kept as {path.name}.bak; say undo to restore it)"
+    return status
+
+
+def _ParseArgs(args) -> list:
+    """`args` arrives as a STRING from the tool call; accept a list too."""
+    if not args:
+        return []
+    if isinstance(args, (list, tuple)):
+        return [str(a) for a in args]
+    import shlex
+    try:
+        if sys.platform != "win32":
+            return shlex.split(str(args))
+        # Non-posix keeps Windows backslashes; drop the quotes it leaves on.
+        return [a[1:-1] if len(a) > 1 and a[0] == a[-1] and a[0] in "\"'" else a
+                for a in shlex.split(str(args), posix=False)]
+    except ValueError:
+        return str(args).split()
+
+
 def _preview(code: str, lines: int = 10) -> str:
     all_lines = code.splitlines()
     preview   = "\n".join(all_lines[:lines])
@@ -341,7 +383,9 @@ Updated code:"""
     except Exception as e:
         return f"Could not edit code: {e}"
 
-    status = _SaveFile(Path(file_path), edited)
+    if not edited:
+        return "The edit came back empty, so I left the file unchanged."
+    status = _SaveWithUndo(Path(file_path), edited, "edited")
     print(f"[Code] ✅ Edited: {file_path}")
     return f"File edited. {status}\n\nPreview:\n{_preview(edited)}"
 
@@ -385,6 +429,9 @@ def RunAction(file_path, args, timeout, player) -> str:
     return RunFile(p, args, timeout)
 
 
+_OPTIMIZE_LIMIT = 12000   # chars the model sees whole
+
+
 def OptimizeAction(file_path, code, language, output_path, player) -> str:
 
     if file_path and not code:
@@ -393,6 +440,11 @@ def OptimizeAction(file_path, code, language, output_path, player) -> str:
             return err
     if not code:
         return "Please provide code or a file path to optimize, sir."
+    # The whole file must fit in the prompt, or the result is a cut-down file.
+    if len(code) > _OPTIMIZE_LIMIT:
+        return (f"That code is {len(code)} characters, more than the {_OPTIMIZE_LIMIT} I can "
+                f"optimize in one go without losing part of it. Nothing was changed. "
+                f"Try a smaller file or one function at a time.")
 
     if player:
         player.WriteLog("[Code] Optimizing code...")
@@ -410,7 +462,7 @@ Optimize the following code for:
 Return ONLY the optimized code — no explanation, no markdown, no backticks.
 
 Original code:
-{code[:6000]}
+{code}
 
 Optimized code:"""
 
@@ -420,13 +472,15 @@ Optimized code:"""
     except Exception as e:
         return f"Could not optimize code: {e}"
 
-    # Kaydet
+    if not optimized:
+        return "The optimized code came back empty, so nothing was changed."
+
     if file_path:
         save_path = Path(file_path)
     else:
         save_path = ResolveSavePath(output_path, lang)
 
-    status = _SaveFile(save_path, optimized)
+    status = _SaveWithUndo(save_path, optimized, "optimized")
     print(f"[Code] ✅ Optimized: {save_path}")
 
     original_lines  = len(code.splitlines())
@@ -439,6 +493,17 @@ Optimized code:"""
         f"({'−' if diff > 0 else '+'}{abs(diff)} lines)\n\n"
         f"Preview:\n{_preview(optimized)}"
     )
+
+
+def _LooksLikeWholeFile(block: str, original: str) -> bool:
+    """True only if the model saw the whole file and the block is about as long."""
+    if len(original) > 4000:          # the prompt only carried the first 4000 chars
+        return False
+    want = len(original.strip().splitlines())
+    got  = len(block.strip().splitlines())
+    if want == 0:
+        return False
+    return max(3, int(want * 0.8)) <= got <= want * 2 + 20
 
 
 def ScreenDebugAction(description, file_path, player, speak=None) -> str:
@@ -506,10 +571,14 @@ Be specific and actionable. If you see an error message, quote it exactly."""
             code_match = re.search(r"```[a-zA-Z]*\n(.*?)```", analysis, re.DOTALL)
             if code_match:
                 fixed_code = code_match.group(1).strip()
-                save_path  = Path(file_path)
-                _SaveFile(save_path, fixed_code)
-                analysis += f"\n\n✅ Fixed code has been saved to: {file_path}"
-                print(f"[Code] ✅ Fixed code saved: {file_path}")
+                if _LooksLikeWholeFile(fixed_code, file_content):
+                    status = _SaveWithUndo(Path(file_path), fixed_code, "screen-debug fixed")
+                    analysis += f"\n\n✅ Fixed code: {status}"
+                    print(f"[Code] ✅ Fixed code saved: {file_path}")
+                else:
+                    # Only a snippet: writing it would replace the whole file.
+                    analysis += (f"\n\nI did not change {Path(file_path).name}: the fix above "
+                                 f"is only part of the file, so apply it by hand.")
 
         return analysis
 
@@ -549,7 +618,7 @@ def CodeHelper(
     output_path = p.get("output_path", "").strip()
     file_path   = p.get("file_path", "").strip()
     code        = p.get("code", "").strip()
-    args        = p.get("args", [])
+    args        = _ParseArgs(p.get("args", []))
     timeout     = int(p.get("timeout", 30))
 
     if action == "auto":

@@ -99,9 +99,19 @@ def request(key: str, title: str, detail: str, run: Callable[[], str]) -> str:
                 f"not available, so I have not done it.")
 
     with _lock:
+        replaced = _pending
         _next_id += 1
         _pending = _Pending(key=key, title=title, detail=detail,
                             run=run, at=time.monotonic(), id=_next_id)
+
+    if replaced is not None:
+        # The old question is gone: its banner and any copy of it (the phone) are taken down first.
+        _log(f"SYS: Replaced — {replaced.title}")
+        if _hide_cb:
+            try:
+                _hide_cb()
+            except Exception:
+                pass
 
     try:
         _show_cb(title, detail)

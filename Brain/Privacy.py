@@ -52,14 +52,15 @@ def Get() -> dict:
 def Save(on: bool | None = None, kinds=None, updated: str | None = None) -> dict:
     """Change private mode and/or its kinds. `updated` is set to now unless given (the phone's own time,
     which may be "" when the phone has never been changed)."""
-    from Brain.Settings import PatchConfig
-    cur = Get()
-    if on is not None:
-        cur["on"] = bool(on)
-    if kinds is not None:
-        cur["kinds"] = [k for k in KIND_KEYS if k in set(kinds)]
-    cur["updated"] = datetime.now().strftime("%Y-%m-%dT%H:%M:%S") if updated is None else str(updated)
-    PatchConfig(privacy=cur)
+    from Brain.Settings import PatchConfig, _LOCK
+    with _LOCK:      # read and write as one step
+        cur = Get()
+        if on is not None:
+            cur["on"] = bool(on)
+        if kinds is not None:
+            cur["kinds"] = [k for k in KIND_KEYS if k in set(kinds)]
+        cur["updated"] = datetime.now().strftime("%Y-%m-%dT%H:%M:%S") if updated is None else str(updated)
+        PatchConfig(privacy=cur)
     return cur
 
 
@@ -91,8 +92,15 @@ def _Norm(key: str) -> str:
 
 
 def ForGemini(memory: dict | None) -> dict | None:
-    """`memory` without its private facts while private mode is active; unchanged otherwise."""
-    if not memory or not Active():
+    """`memory` without its private facts while private mode is active; unchanged otherwise.
+    Summaries of on-device sessions ("local": True) never go to Gemini, private mode or not."""
+    if not memory:
+        return memory
+    sessions = memory.get("sessions") if isinstance(memory, dict) else None
+    if isinstance(sessions, list) and any(isinstance(s, dict) and s.get("local") for s in sessions):
+        memory = dict(memory)
+        memory["sessions"] = [s for s in sessions if not (isinstance(s, dict) and s.get("local"))]
+    if not Active():
         return memory
     kinds = set(Get()["kinds"])
     out = {}
@@ -159,11 +167,17 @@ def SplitMemory(text: str, kinds=None) -> tuple[str, str]:
     """recall_memory's answer split into (for Gemini, private lines). Lines look like "category/Key: value"."""
     keep, hidden = [], []
     kinds = set(Get()["kinds"] if kinds is None else kinds)
+    in_private = False
     for line in str(text or "").splitlines():
         cat, slash, rest = line.partition("/")
         key = rest.partition(":")[0]
-        if slash and ":" in rest and IsPrivate(cat.strip(), key.strip(), kinds):
+        is_row = bool(slash and ":" in rest and cat.strip() and " " not in cat.strip())
+        if is_row and IsPrivate(cat.strip(), key.strip(), kinds):
             hidden.append(f"{key.strip()}: {rest.partition(':')[2].strip()}")
+            in_private = True
+        elif not is_row and in_private and line.strip() and not line.startswith("(+"):
+            hidden.append(line.strip())      # the rest of a multi-line private value
         else:
             keep.append(line)
+            in_private = in_private and not is_row and not line.strip()
     return "\n".join(keep), "\n".join(hidden)

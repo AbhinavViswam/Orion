@@ -51,16 +51,17 @@ _CONFIG_PATH = _BASE / "Config" / "ApiKeys.json"
 
 def LoadConfig() -> dict:
     try:
-        return json.loads(_CONFIG_PATH.read_text(encoding="utf-8"))
+        from Brain.Settings import LoadApiKeys
+        return LoadApiKeys()
     except Exception:
         return {}
 
 
 def SaveConfigKey(key: str, value) -> None:
+    # Through Settings: one lock and a safe write, so the keys can't be wiped.
     try:
-        cfg = LoadConfig()
-        cfg[key] = value
-        _CONFIG_PATH.write_text(json.dumps(cfg, indent=4), encoding="utf-8")
+        from Brain.Settings import PatchConfig
+        PatchConfig(**{key: value})
     except Exception as e:
         print(f"[Vision] ⚠️  Could not save config key '{key}': {e}")
 

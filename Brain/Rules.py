@@ -137,6 +137,13 @@ def _Put(memory: dict, key: str, value: str, at: float | None = None) -> None:
 def Learn(rule: str = "", replaces: str = "") -> str:
     """Keep a rule, replace one it changes, or (rule empty) forget one. The
     result is written for the model: what happened, and what to say."""
+    from Brain.Memory import _lock
+
+    with _lock:      # load, change and save as one step
+        return _Learn(rule, replaces)
+
+
+def _Learn(rule: str, replaces: str) -> str:
     from Brain.Memory import LoadMemory, SaveMemory
     from Brain.Undo import PushUndo
 
@@ -185,13 +192,14 @@ def Learn(rule: str = "", replaces: str = "") -> str:
 
 
 def _Restore(put_back: list[dict], take_out: list[str]) -> str:
-    from Brain.Memory import LoadMemory, SaveMemory
-    memory = LoadMemory()
-    for k in take_out:
-        memory.get(CATEGORY, {}).pop(k, None)
-    for r in put_back:
-        _Put(memory, r["key"], r["value"], r.get("at") or None)
-    SaveMemory(memory)
+    from Brain.Memory import LoadMemory, SaveMemory, _lock
+    with _lock:
+        memory = LoadMemory()
+        for k in take_out:
+            memory.get(CATEGORY, {}).pop(k, None)
+        for r in put_back:
+            _Put(memory, r["key"], r["value"], r.get("at") or None)
+        SaveMemory(memory)
     return "Rule taken back." if take_out else "Rule back."
 
 

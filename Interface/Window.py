@@ -4468,6 +4468,7 @@ class MainWindow(QMainWindow):
     _video_mute_sig  = pyqtSignal(bool)
     _mic_mute_sig    = pyqtSignal(bool, str)   # (muted, note): plugins closing the mic, e.g. during a call
     _mic_hold_sig    = pyqtSignal(bool)        # hold-to-speak: muted, with no log line
+    _hold_hint_sig   = pyqtSignal(str)         # hold-to-speak chord shown on the HUD (any thread)
     _clipboard_sig  = pyqtSignal(str)        # clipboard text changed (thread-safe)
     _confirm_sig    = pyqtSignal(str, str)   # (title, detail) — irreversible-action gate
     _settings_sig   = pyqtSignal(str)        # open Settings at a section, from any thread
@@ -4513,6 +4514,7 @@ class MainWindow(QMainWindow):
         self.on_interrupt      = None   # callable: () -> None — stop ORION mid-speech
         self.on_voice_change   = None   # callable: () -> None — rebuild session with new voice
         self.on_audio_device_change = None  # callable: () -> None — reopen audio streams
+        self.on_quit           = None   # callable: () -> None — last words before Orion quits (session summary)
         self._confirm_overlay  = None   # live ConfirmBanner, if one is on screen
         self.get_plugins       = None   # callable: () -> list[dict], set by OrionLive
         self.get_plugin_settings = None # callable: () -> list[dict] settings schemas, set by OrionLive
@@ -4522,6 +4524,8 @@ class MainWindow(QMainWindow):
         self._current_file: str | None = None
         self._floating         = None   # the floating reactor, when Orion has one (OrionUI)
         self._quitting         = False
+        self._quit_hook_done   = False
+        QApplication.instance().aboutToQuit.connect(self.RunQuitHook)
 
         central = QWidget()
         central.setStyleSheet(f"background: {C.BG};")
@@ -4754,6 +4758,7 @@ class MainWindow(QMainWindow):
         self._video_mute_sig.connect(self.OnVideoMute)
         self._mic_mute_sig.connect(self.SetMuted)
         self._mic_hold_sig.connect(lambda m: self.SetMuted(m, quiet=True))
+        self._hold_hint_sig.connect(self.ShowHoldHint)
         self._clipboard_sig.connect(self.ShowClipboardPanel)
         self._quiz_sig.connect(self._ShowQuiz)
         self._quiz_hide_sig.connect(self._HideQuiz)
@@ -4787,7 +4792,7 @@ class MainWindow(QMainWindow):
         sc_full = QShortcut(QKeySequence("F11"), self)
         sc_full.activated.connect(self.ToggleFullscreen)
         sc_intr = QShortcut(QKeySequence("Escape"), self)
-        sc_intr.activated.connect(self.DoInterrupt)
+        sc_intr.activated.connect(self.OnEscape)    # closes Settings/panels first
 
     def _ShowCameraFrame(self, img_bytes: bytes):
         """Slot — display camera preview overlay (main thread)."""
@@ -4822,12 +4827,20 @@ class MainWindow(QMainWindow):
                 )
 
     def StartCameraStream(self) -> None:
-        self._cam_stop.clear()
+        # Each stream gets its own stop event: reusing one revived an old thread (two captures)
+        self._cam_stop.set()
+        stop = threading.Event()
+        self._cam_stop = stop
         self._cam_stream_sig.emit(True)
-        t = threading.Thread(target=self.CamLoop, daemon=True, name="cam-stream")
+        prev = getattr(self, "_cam_thread", None)
+        t = threading.Thread(target=self.CamLoop, args=(stop, prev), daemon=True, name="cam-stream")
+        self._cam_thread = t
         t.start()
 
-    def CamLoop(self) -> None:
+    def CamLoop(self, stop: threading.Event | None = None, prev: threading.Thread | None = None) -> None:
+        stop = stop or self._cam_stop
+        if prev is not None and prev.is_alive():
+            prev.join(2.0)                     # let the old stream release the camera first
         try:
             import cv2
             # Reuse camera index detected by screen_processor (cached in ApiKeys.json)
@@ -4850,7 +4863,7 @@ class MainWindow(QMainWindow):
             # warm-up frames
             for _ in range(5):
                 cap.read()
-            while not self._cam_stop.wait(0.033) and cap.isOpened():
+            while not stop.wait(0.033) and cap.isOpened():
                 ret, frame = cap.read()
                 if ret and frame is not None:
                     _, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 65])
@@ -4859,7 +4872,8 @@ class MainWindow(QMainWindow):
         except Exception as e:
             print(f"[Camera] Stream error: {e}")
         finally:
-            self._cam_stream_sig.emit(False)
+            if stop is self._cam_stop:          # a newer stream owns the HUD otherwise
+                self._cam_stream_sig.emit(False)
 
     def StopCameraStream(self) -> None:
         self._cam_stop.set()
@@ -5624,6 +5638,7 @@ class MainWindow(QMainWindow):
         lay.addLayout(top)
 
         self._log = LogWidget()
+        self._log._ai_name_lc = (self._assistant_name or "orion").lower()   # a renamed assistant's lines stay AI lines
         lay.addWidget(self._log, stretch=1)
 
         lay.addWidget(Sec("FILES"))
@@ -6500,13 +6515,16 @@ class MainWindow(QMainWindow):
                 SaveVoice(voice)
                 voice_changed = True
 
+        names_changed = False
         try:
-            data = ReadFullConfig()
-            data["assistant_name"] = self._assistant_name
-            data["user_name"] = user_name.strip()
+            old_cfg = ReadFullConfig()
+            names_changed = ((old_cfg.get("assistant_name") or "ORION").strip() != self._assistant_name
+                             or (old_cfg.get("user_name") or "").strip() != user_name.strip())
+            fields = {"assistant_name": self._assistant_name, "user_name": user_name.strip()}
             if ui_color:
-                data["ui_color"] = ui_color.strip().lower()
-            API_FILE.write_text(json.dumps(data, indent=4), encoding="utf-8")
+                fields["ui_color"] = ui_color.strip().lower()
+            from Brain.Settings import PatchConfig
+            PatchConfig(**fields)
             self._log.AppendLog(f"SYS: Identity updated — {display}")
             if color_changed:
                 self._log.AppendLog(f"SYS: UI colour applied — {ui_color}")
@@ -6517,6 +6535,9 @@ class MainWindow(QMainWindow):
 
         if voice_changed and self.on_voice_change:
             self.on_voice_change()
+        elif names_changed:
+            # The names live in the session's instructions: rebuild it (conversation kept)
+            self.QueueReconnect("new name")
 
     def CentreOverlay(self, ov) -> None:
         """Place a floating overlay in the middle of the HUD and show it."""
@@ -6949,6 +6970,10 @@ class MainWindow(QMainWindow):
 
     def OnClipboardChanged(self):
         try:
+            # ⚙ "Clipboard help" off: never preview copies (they can be passwords)
+            from Brain.Settings import GetClipboardHelpEnabled
+            if not GetClipboardHelpEnabled():
+                return
             text = QApplication.clipboard().text().strip()
             if len(text) >= 10:
                 self._clipboard_sig.emit(text)
@@ -6974,9 +6999,28 @@ class MainWindow(QMainWindow):
 
     # ────────────────────────────────────────────────────────────────────────────
 
+    def ShowHoldHint(self, chord: str) -> None:
+        self.hud.hold_hint = str(chord or "")
+        self.hud.update()
+
     def DoInterrupt(self):
         if self.on_interrupt:
             self.on_interrupt()
+
+    def OnEscape(self):
+        """Esc closes an open panel first; only with nothing open does it stop Orion talking."""
+        ov = getattr(self, "_settings_overlay", None)
+        try:
+            if ov is not None and ov.isVisible():
+                ov.close()
+                return
+        except RuntimeError:
+            self._settings_overlay = None
+        panel = getattr(self, "_clipboard_panel", None)
+        if panel is not None and panel.isVisible():
+            panel.hide()
+            return
+        self.DoInterrupt()
 
     # ── The floating reactor (Interface/FloatingReactor.py) ─────────────────
     # One look at a time: showing one hides the other.
@@ -7027,7 +7071,21 @@ class MainWindow(QMainWindow):
         self._quitting = True
         if self._floating is not None:
             self._floating.hide()
+        self.hide()                       # gone at once; the summary is saved behind it
+        QApplication.processEvents()
+        self.RunQuitHook()
         QApplication.instance().quit()
+
+    def RunQuitHook(self) -> None:
+        """Once per run, from any quit path (menu, tray, last window closed)."""
+        if self._quit_hook_done:
+            return
+        self._quit_hook_done = True
+        if self.on_quit:
+            try:
+                self.on_quit()            # bounded by its own short timeout
+            except Exception as e:
+                print(f"[ORION] quit hook failed: {e}")
 
     def closeEvent(self, e):
         # With the floating reactor, closing the window only puts Orion back
@@ -7120,11 +7178,9 @@ class MainWindow(QMainWindow):
         self._overlay = ov
 
     def OnSetupDone(self, key: str, os_name: str):
-        os.makedirs(CONFIG_DIR, exist_ok=True)
-        API_FILE.write_text(
-            json.dumps({"gemini_api_key": key, "os_system": os_name}, indent=4),
-            encoding="utf-8",
-        )
+        # Merge into the existing file so names, voice, providers etc. are kept
+        from Brain.Settings import PatchConfig
+        PatchConfig(gemini_api_key=key.strip(), os_system=os_name)
         self._ready = True
         if self._overlay:
             self._overlay.hide()
@@ -7349,6 +7405,14 @@ class OrionUI:
         self._win.on_voice_change = cb
 
     @property
+    def on_quit(self):
+        return self._win.on_quit
+
+    @on_quit.setter
+    def on_quit(self, cb):
+        self._win.on_quit = cb
+
+    @property
     def on_audio_device_change(self):
         return self._win.on_audio_device_change
 
@@ -7505,9 +7569,8 @@ class OrionUI:
         self._win._mic_hold_sig.emit(bool(muted))
 
     def SetHoldHint(self, chord: str) -> None:
-        """Show 'HOLD <chord>' on the HUD while muted ('' puts back 'MUTED')."""
-        self._win.hud.hold_hint = str(chord or "")
-        self._win.hud.update()
+        """Thread-safe: show 'HOLD <chord>' on the HUD while muted ('' puts back 'MUTED')."""
+        self._win._hold_hint_sig.emit(str(chord or ""))
 
     def SetVideoMuted(self, muted: bool) -> None:
         """Thread-safe: silence or unsilence whatever is playing."""

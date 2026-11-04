@@ -22,6 +22,31 @@ from Brain import Gemini
 MODEL_PLANNER    = Gemini.SMART
 MODEL_WRITER     = Gemini.SMART
 
+def InProject(project_dir: Path, rel: str) -> Path:
+    """Resolve a model-chosen path; refuse anything outside the project folder."""
+    root = project_dir.resolve()
+    full = (root / rel).resolve()
+    if full != root and not full.is_relative_to(root):
+        raise ValueError(f"'{rel}' is outside the project folder")
+    return full
+
+
+def ProjectPython(project_dir: Path, create: bool = False) -> Path | None:
+    """The project's own .venv python, so its packages never land in Orion's."""
+    venv = project_dir / ".venv"
+    py = venv / ("Scripts/python.exe" if sys.platform == "win32" else "bin/python")
+    if py.exists():
+        return py
+    if not create or getattr(sys, "frozen", False):
+        return None
+    try:
+        subprocess.run([sys.executable, "-m", "venv", str(venv)],
+                       capture_output=True, timeout=180)
+    except Exception as e:
+        print(f"[DevAgent] venv failed: {e}")
+    return py if py.exists() else None
+
+
 def GetApiKey() -> str:
     with open(API_CONFIG_PATH, "r", encoding="utf-8") as f:
         return json.load(f)["gemini_api_key"]
@@ -227,7 +252,7 @@ Code for {file_path}:"""
         response = model.generate_content(prompt)
         code = StripFences(response.text)
 
-        full_path = project_dir / file_path
+        full_path = InProject(project_dir, file_path)
         full_path.parent.mkdir(parents=True, exist_ok=True)
         full_path.write_text(code, encoding="utf-8")
 
@@ -243,11 +268,16 @@ def InstallDependencies(dependencies: list[str], project_dir: Path) -> str:
     if not dependencies:
         return "No external dependencies."
 
+    py = ProjectPython(project_dir, create=True)
+    if py is None:
+        return ("Could not make a virtual environment for the project, so I did not "
+                f"install {', '.join(dependencies)}. Install them yourself.")
+
     to_install = []
     for dep in dependencies:
         pkg_name = re.split(r"[>=<!]", dep)[0].strip()
         result = subprocess.run(
-            [sys.executable, "-m", "pip", "show", pkg_name],
+            [str(py), "-m", "pip", "show", pkg_name],
             capture_output=True, text=True
         )
         if result.returncode != 0:
@@ -261,7 +291,7 @@ def InstallDependencies(dependencies: list[str], project_dir: Path) -> str:
     print(f"[DevAgent] 📦 Installing: {to_install}")
     try:
         result = subprocess.run(
-            [sys.executable, "-m", "pip", "install"] + to_install,
+            [str(py), "-m", "pip", "install", "--"] + to_install,
             capture_output=True, text=True,
             encoding="utf-8", errors="replace",
             timeout=120, cwd=str(project_dir)
@@ -299,8 +329,10 @@ def RunProject(run_command: str, project_dir: Path, timeout: int = 30) -> str:
     print(f"[DevAgent] 🚀 Running: {run_command}")
     try:
         parts = run_command.split()
-        if parts[0].lower() == "python":
-            parts[0] = sys.executable
+        if parts[0].lower() in ("python", "python3", "py"):
+            # The project's venv if it has one, so its own packages are found.
+            py = ProjectPython(project_dir)
+            parts[0] = str(py) if py else sys.executable
 
         result = subprocess.run(
             parts,
@@ -338,10 +370,13 @@ def TryAutoInstall(error_output: str, project_dir: Path) -> bool:
         return False
 
     pkg = match.group(1).replace("_", "-").split(".")[0]
+    py = ProjectPython(project_dir, create=True)
+    if py is None or pkg.startswith("-"):
+        return False
     print(f"[DevAgent] 🔧 Auto-installing missing package: {pkg}")
     try:
         result = subprocess.run(
-            [sys.executable, "-m", "pip", "install", pkg],
+            [str(py), "-m", "pip", "install", pkg],
             capture_output=True, text=True,
             encoding="utf-8", errors="replace",
             timeout=60, cwd=str(project_dir)
@@ -425,7 +460,7 @@ Fixed code for {fix_path}:"""
             response = model.generate_content(prompt)
             fixed = StripFences(response.text)
 
-            full_path = project_dir / fix_path
+            full_path = InProject(project_dir, fix_path)
             full_path.parent.mkdir(parents=True, exist_ok=True)
             full_path.write_text(fixed, encoding="utf-8")
 

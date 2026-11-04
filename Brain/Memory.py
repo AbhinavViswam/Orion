@@ -1,9 +1,11 @@
 import json
 import re
 from datetime import datetime
-from threading import Lock
+from threading import RLock
 from pathlib import Path
 import sys
+
+from Brain.Settings import AtomicWrite
 
 
 def GetBaseDir() -> Path:
@@ -14,7 +16,8 @@ def GetBaseDir() -> Path:
 
 BASE_DIR         = GetBaseDir()
 MEMORY_PATH      = BASE_DIR / "Brain" / "LongTerm.json"
-_lock            = Lock()
+# Re-entrant: hold it across a whole load-change-save (Rules.py, BackgroundMonitor use it too).
+_lock            = RLock()
 MAX_VALUE_LENGTH = 380
 
 # ── Why there are two very different numbers here ────────────────────────────
@@ -55,22 +58,38 @@ def EmptyMemory() -> dict:
         "rules":         {},      # corrections kept as standing rules (Brain/Rules.py)
     }
 
-def LoadMemory() -> dict:
-    if not MEMORY_PATH.exists():
-        return EmptyMemory()
+def _BackupPath() -> Path:
+    """LongTerm.bak.json: the copy before the last save."""
+    return MEMORY_PATH.with_name(MEMORY_PATH.stem + ".bak" + MEMORY_PATH.suffix)
+
+
+def _Parse(text: str) -> dict:
+    data = json.loads(text)
+    if not isinstance(data, dict):
+        raise ValueError("not a JSON object")
+    for key in EmptyMemory():
+        if key not in data:
+            data[key] = {}
+    return data
+
+
+def _Read() -> tuple[dict, bool]:
+    """(memory, read OK). A file that won't parse falls back to the backup, then to empty."""
     with _lock:
+        if not MEMORY_PATH.exists():
+            return EmptyMemory(), True
         try:
-            data = json.loads(MEMORY_PATH.read_text(encoding="utf-8"))
-            if isinstance(data, dict):
-                base = EmptyMemory()
-                for key in base:
-                    if key not in data:
-                        data[key] = {}
-                return data
-            return EmptyMemory()
+            return _Parse(MEMORY_PATH.read_text(encoding="utf-8")), True
         except Exception as e:
-            print(f"[Memory] ⚠️ Load error: {e}")
-            return EmptyMemory()
+            print(f"[Memory] ⚠️ Load error: {e} — using the backup copy")
+        try:
+            return _Parse(_BackupPath().read_text(encoding="utf-8")), False
+        except Exception:
+            return EmptyMemory(), False
+
+
+def LoadMemory() -> dict:
+    return _Read()[0]
 
 def AllEntries(memory: dict) -> list[tuple]:
     entries = []
@@ -120,12 +139,20 @@ def SaveMemory(memory: dict) -> None:
     if not isinstance(memory, dict):
         return
     memory = TrimToLimit(memory)
-    MEMORY_PATH.parent.mkdir(parents=True, exist_ok=True)
     with _lock:
-        MEMORY_PATH.write_text(
-            json.dumps(memory, indent=2, ensure_ascii=False),
-            encoding="utf-8",
-        )
+        if MEMORY_PATH.exists():
+            old = MEMORY_PATH.read_text(encoding="utf-8", errors="replace")
+            try:
+                _Parse(old)
+                AtomicWrite(_BackupPath(), old)          # the copy before this save
+            except Exception:
+                # Unreadable: set it aside so it is never written over unseen.
+                stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+                try:
+                    AtomicWrite(MEMORY_PATH.with_name(f"{MEMORY_PATH.stem}.broken-{stamp}{MEMORY_PATH.suffix}"), old)
+                except Exception:
+                    pass
+        AtomicWrite(MEMORY_PATH, json.dumps(memory, indent=2, ensure_ascii=False))
 
 
 def TruncateValue(val: str) -> str:
@@ -160,10 +187,11 @@ def RecursiveUpdate(target: dict, updates: dict) -> bool:
 def UpdateMemory(memory_update: dict) -> dict:
     if not isinstance(memory_update, dict) or not memory_update:
         return LoadMemory()
-    memory = LoadMemory()
-    if RecursiveUpdate(memory, memory_update):
-        SaveMemory(memory)
-        print(f"[Memory] 💾 Saved: {list(memory_update.keys())}")
+    with _lock:
+        memory = LoadMemory()
+        if RecursiveUpdate(memory, memory_update):
+            SaveMemory(memory)
+            print(f"[Memory] 💾 Saved: {list(memory_update.keys())}")
     return memory
 
 def EntryValue(entry) -> str:
@@ -373,7 +401,9 @@ def SearchMemory(query: str, limit: int = 8) -> str:
                 else "I have not stored anything about this person yet.")
 
     rows.sort(key=lambda r: (-r[0], r[2]))
-    lines = [f"{cat}/{Pretty(key)}: {val}" for _s, cat, key, val in rows[:max(1, limit)]]
+    # One line per fact: Privacy.SplitMemory works line by line.
+    lines = [f"{cat}/{Pretty(key)}: " + re.sub(r"\s*[\r\n]+\s*", " ", val)
+             for _s, cat, key, val in rows[:max(1, limit)]]
     head  = (f"Stored facts matching '{query}':" if query
              else "Everything currently stored:")
     more  = (f"\n(+{len(rows) - len(lines)} more — search with a narrower keyword)"
@@ -413,13 +443,14 @@ def remember(key: str, value: str, category: str = "notes") -> str:
 
 
 def forget(key: str, category: str = "notes") -> str:
-    memory = LoadMemory()
-    cat    = memory.get(category, {})
-    if key in cat:
-        del cat[key]
-        memory[category] = cat
-        SaveMemory(memory)
-        return f"Forgotten: {category}/{key}"
+    with _lock:
+        memory = LoadMemory()
+        cat    = memory.get(category, {})
+        if key in cat:
+            del cat[key]
+            memory[category] = cat
+            SaveMemory(memory)
+            return f"Forgotten: {category}/{key}"
     return f"Not found: {category}/{key}"
 
 
@@ -431,51 +462,58 @@ forget_memory = forget
 _SESSION_MAX = 3   # safety cap — in practice 0-1 entries after pop
 
 
-def SaveSessionSummary(summary: str, language: str = "") -> None:
-    """Append a 1-2 sentence session summary to LongTerm.json['sessions']."""
+def SaveSessionSummary(summary: str, language: str = "", local: bool = False) -> None:
+    """Append a 1-2 sentence session summary to LongTerm.json['sessions'].
+    `local`: the session was with the laptop's own brain, so the summary is
+    marked and never handed to Gemini (see PopLastSession)."""
     summary = (summary or "").strip()
     if not summary:
         return
-    memory   = LoadMemory()
-    sessions = memory.get("sessions", [])
-    if not isinstance(sessions, list):
-        sessions = []
     entry: dict = {
         "date":    datetime.now().strftime("%Y-%m-%d"),
         "summary": summary[:280],
     }
     if language:
         entry["language"] = language
-    sessions.append(entry)
-    memory["sessions"] = sessions[-_SESSION_MAX:]
+    if local:
+        entry["local"] = True
     with _lock:
-        MEMORY_PATH.parent.mkdir(parents=True, exist_ok=True)
-        MEMORY_PATH.write_text(
-            json.dumps(memory, indent=2, ensure_ascii=False),
-            encoding="utf-8",
-        )
+        memory   = LoadMemory()
+        sessions = memory.get("sessions", [])
+        if not isinstance(sessions, list):
+            sessions = []
+        sessions.append(entry)
+        memory["sessions"] = sessions[-_SESSION_MAX:]
+        SaveMemory(memory)
     print(f"[Memory] 📝 Session saved ({entry['date']}): {summary[:60]}…")
 
 
-def PopLastSession() -> dict | None:
+def PopLastSession(skip_local: bool = False) -> dict | None:
     """
     Return AND remove the most recent session entry.
     Calling this consumes the entry so it is never repeated in future briefings.
+    `skip_local`: for Gemini — take the newest entry that is not from an
+    on-device session; on-device ones are left where they are.
     """
     with _lock:
         if not MEMORY_PATH.exists():
             return None
         try:
-            memory   = json.loads(MEMORY_PATH.read_text(encoding="utf-8"))
+            memory, ok = _Read()
+            if not ok:
+                return None
             sessions = memory.get("sessions", [])
             if not isinstance(sessions, list) or not sessions:
                 return None
-            entry = sessions.pop()          # remove the last entry
+            idx = len(sessions) - 1
+            if skip_local:
+                while idx >= 0 and isinstance(sessions[idx], dict) and sessions[idx].get("local"):
+                    idx -= 1
+                if idx < 0:
+                    return None
+            entry = sessions.pop(idx)
             memory["sessions"] = sessions
-            MEMORY_PATH.write_text(
-                json.dumps(memory, indent=2, ensure_ascii=False),
-                encoding="utf-8",
-            )
+            SaveMemory(memory)
             return entry
         except Exception as e:
             print(f"[Memory] ⚠️ pop_last_session error: {e}")

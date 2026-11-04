@@ -615,16 +615,25 @@ def ToggleWifi():
         subprocess.run(["networksetup", "-setairportpower", iface, state],
             capture_output=True)
     elif _OS == "Windows":
-        try:
-            subprocess.run(
-                ["powershell", "-Command",
-                 "$adapter = Get-NetAdapter | Where-Object {$_.PhysicalMediaType -eq 'Native 802.11'};"
-                 "if ($adapter.Status -eq 'Up') { Disable-NetAdapter -Name $adapter.Name -Confirm:$false }"
-                 "else { Enable-NetAdapter -Name $adapter.Name -Confirm:$false }"],
-                capture_output=True, timeout=10, **_WIN_HIDE
-            )
-        except Exception as e:
-            print(f"[Settings] toggle_wifi Windows failed: {e}")
+        # Raise on failure so the confirm worker reports it instead of "done".
+        result = subprocess.run(
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command",
+             "$ErrorActionPreference = 'Stop';"
+             "$adapter = Get-NetAdapter | Where-Object {$_.PhysicalMediaType -eq 'Native 802.11'} | Select-Object -First 1;"
+             "if (-not $adapter) { throw 'no WiFi adapter found' };"
+             "if ($adapter.Status -eq 'Up') { Disable-NetAdapter -Name $adapter.Name -Confirm:$false }"
+             "else { Enable-NetAdapter -Name $adapter.Name -Confirm:$false }"],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=20, **_WIN_HIDE
+        )
+        if result.returncode != 0:
+            err = (result.stderr or "").strip()
+            low = err.lower()
+            if "access" in low or "administrator" in low or "permission" in low:
+                raise RuntimeError("switching WiFi needs Orion to run as administrator")
+            if "no wifi adapter" in low:
+                raise RuntimeError("no WiFi adapter was found")
+            raise RuntimeError(err.splitlines()[0][:200] if err else "the WiFi switch failed")
     else:
         try:
             result = subprocess.run(["nmcli", "radio", "wifi"], capture_output=True, text=True, encoding="utf-8", errors="replace")
@@ -808,14 +817,20 @@ def DetectAction(description: str) -> dict:
 
     low = raw.lower()
 
+    # Whole words only: "processes" holds "ses", "clock" holds "lock".
+    def HasWord(phrase: str) -> bool:
+        return re.search(rf"(?<!\w){re.escape(phrase)}(?!\w)", low) is not None
+
     # 2. "set volume to 30", "sesi 30 yap" — a number next to a volume word.
     num = re.search(r"(\d{1,3})\s*%?", low)
-    if num and any(w in low for w in ("volume", "ses", "sound", "lautstark", "громкость")):
+    # Volume words must start a word (Turkish "sesi", "sesini" still match).
+    if num and any(re.search(rf"(?<!\w){w}", low)
+                   for w in ("volume", "ses", "sound", "lautstärke", "lautstark", "громкост")):
         return {"action": "volume_set", "value": max(0, min(100, int(num.group(1))))}
 
     # 3. Alias phrases.
     for action, phrases in _ALIASES.items():
-        if any(Normalise(p) == norm or p in low for p in phrases):
+        if any(Normalise(p) == norm or HasWord(p) for p in phrases):
             return {"action": action, "value": None}
 
     # 4. Fuzzy match on the action names — catches "fullscren", "volumeup".

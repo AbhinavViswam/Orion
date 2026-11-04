@@ -227,9 +227,9 @@ def DecodeMp3(data: bytes) -> bytes:
         resampler = av.AudioResampler(format="s16", layout="mono",
                                       rate=Audio.SPEAKER_RATE)
         for frame in container.decode(audio=0):
-            for res in resampler.Resample(frame):
+            for res in resampler.resample(frame):
                 out.append(res.to_ndarray().reshape(-1))
-        for res in resampler.Resample(None):        # flush
+        for res in resampler.resample(None):        # flush
             out.append(res.to_ndarray().reshape(-1))
     if not out:
         return b""

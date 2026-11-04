@@ -11,13 +11,14 @@ a run() function), so Settings › Plugins lists it with a switch like the rest.
      and memory, and it may only import packages that are already installed
      (nothing is pip-installed for it). From Orion itself it may only use
      Brain.Gemini, the shared model client.
-  3. Test run: the example call runs in a separate Python process with a
-     time limit. It has to return an answer, not crash.
-  4. If the scan or the test fails, the model gets the reason and tries again
-     (twice at most).
-  5. The code is shown in the content panel and the confirmation banner asks
-     whether to add it. Only then is the file written. The session reconnects
-     so the model can use it, and "undo" removes it again.
+  3. If the scan fails, the model gets the reason and tries again (twice at
+     most).
+  4. The code is shown in the content panel and the confirmation banner asks
+     whether to add it. Nothing the model wrote has run yet.
+  5. On yes, the test run: the example call runs in a separate Python process
+     with a time limit. It has to return an answer, not crash. Only then is
+     the file written. The session reconnects so the model can use it, and
+     "undo" removes it again.
 
 Ported from Brahma's skill_forge and skill_crucible. Differences: Brahma
 installs whatever packages the code imports and turns the skill on by itself;
@@ -54,23 +55,54 @@ _NAME = re.compile(r"^[a-z][a-z0-9_]{2,40}$")
 # ── the safety scan ─────────────────────────────────────────────────────────
 
 _BANNED_IMPORTS = {
-    "subprocess", "ctypes", "winreg", "_winreg", "pickle", "marshal", "shelve", "importlib",
+    "subprocess", "ctypes", "_ctypes", "winreg", "_winreg", "pickle", "marshal", "shelve", "importlib",
     "multiprocessing", "runpy", "code", "codeop", "pty", "keyring", "win32api", "win32con",
     "win32process", "win32security", "pywintypes", "comtypes", "psutil", "pyautogui",
     "pynput", "keyboard", "mouse", "smtplib", "ftplib", "telnetlib", "socketserver", "builtins",
+    "socket", "nt", "posix", "_winapi", "_posixsubprocess", "msvcrt", "gc", "inspect", "signal",
+    "sqlite3", "win32com", "pythoncom", "_thread",
 }
-_BANNED_NAMES = {"eval", "exec", "compile", "__import__", "globals", "breakpoint", "input"}
-# Attribute calls, wherever they come from: os.remove, Path.unlink, shutil.rmtree…
-_BANNED_ATTRS = {
-    "system", "popen", "startfile", "spawnl", "spawnv", "spawnlp", "spawnvp", "execv", "execl",
-    "execvp", "execlp", "kill", "remove", "unlink", "rmdir", "removedirs", "rmtree", "move",
-    "rename", "replace", "chmod", "chown", "__subclasses__", "__globals__", "__builtins__",
+# Builtins that run code or reach any object's insides: banned wherever they appear, called or not.
+_BANNED_NAMES = {"eval", "exec", "compile", "__import__", "globals", "locals", "vars", "getattr", "setattr",
+                 "delattr", "breakpoint", "input", "memoryview", "__builtins__", "__loader__", "__spec__",
+                 "__file__"}
+# Exact functions, after `import x as y` / `from x import y` are resolved.
+_BANNED_CALLS = {
+    "os.system", "os.popen", "os.startfile", "os.kill", "os.killpg", "os.remove", "os.unlink", "os.rmdir",
+    "os.removedirs", "os.rename", "os.renames", "os.replace", "os.chmod", "os.chown", "os.lchown",
+    "os.truncate", "os.link", "os.symlink", "os.fork", "os.forkpty", "os.putenv", "os.unsetenv",
+    "os.add_dll_directory", "os.execl", "os.execle", "os.execlp", "os.execlpe", "os.execv", "os.execve",
+    "os.execvp", "os.execvpe", "os.spawnl", "os.spawnle", "os.spawnlp", "os.spawnlpe", "os.spawnv",
+    "os.spawnve", "os.spawnvp", "os.spawnvpe", "os.posix_spawn", "os.posix_spawnp", "os.open", "os.fdopen",
+    "os.environ", "os.getenv",
+    "sys.modules", "sys._getframe", "sys.settrace", "sys.setprofile", "sys.addaudithook", "sys.meta_path",
+    "sys.path_hooks",
+    "asyncio.create_subprocess_exec", "asyncio.create_subprocess_shell",
+    "operator.attrgetter", "operator.methodcaller", "types.FunctionType", "types.CodeType",
+    "io.open", "codecs.open",
 }
-# list.remove, str.replace and platform.system are everywhere: for these the owner decides.
-_ATTR_NEEDS_MODULE = {"remove": {"os"}, "replace": {"os"}, "rename": {"os"}, "move": {"shutil"},
-                      "system": {"os"}, "popen": {"os"}, "kill": {"os"}}
-_BANNED_TEXT = ("apikeys.json", "api_keys.json", "longterm.json", "login data", ".ssh",
-                "system32", "format c:", "wallet.dat", "keychain")
+# Of shutil, only these are harmless.
+_SHUTIL_OK = {"shutil.which", "shutil.disk_usage", "shutil.get_terminal_size"}
+# Method names banned whatever they're called on (Path.unlink, x.rmtree…).
+_BANNED_ATTRS = {"startfile", "unlink", "rmdir", "removedirs", "rmtree", "rename", "chmod", "chown",
+                 "lchmod", "kill", "symlink_to", "hardlink_to",
+                 # frames and code objects: the way from any object back to every module
+                 "f_globals", "f_locals", "f_builtins", "f_back", "tb_frame", "gi_frame", "cr_frame", "ag_frame",
+                 "gi_code", "cr_code", "co_code"}
+# list.remove, str.replace and platform.system are everywhere: banned only when the owner is os / shutil.
+_ATTR_NEEDS_MODULE = {"remove": {"os"}, "replace": {"os"}, "move": {"shutil"}, "system": {"os"},
+                      "popen": {"os"}}
+# Modules that may only be used as `os.something`, never passed around (`m = os`, `[os][0]`).
+_NO_BARE = {"os", "shutil", "sys", "io", "codecs", "operator", "asyncio", "types", "Brain.Gemini"}
+# The only parts of Brain.Gemini a skill may use.
+_GEMINI_OK = {"text", "AsJson", "call", "FAST", "SMART", "SEARCH"}
+# Harmless dunders; every other __x__ is off limits.
+_DUNDERS_OK = {"__name__", "__init__", "__str__", "__repr__", "__eq__", "__ne__", "__lt__", "__le__", "__gt__",
+               "__ge__", "__hash__", "__len__", "__iter__", "__next__", "__enter__", "__exit__", "__doc__",
+               "__main__", "__post_init__", "__contains__", "__bool__", "__all__", "__version__"}
+_BANNED_TEXT = ("apikeys.json", "api_keys.json", "longterm.json", "phonelink.json", "telegram.json",
+                "settings.json", "login data", ".ssh", "system32", "format c:", "wallet.dat", "keychain", ".venv")
+_CONFIG_DIR = re.compile(r"(^|[\\/])config([\\/]|$)", re.IGNORECASE)   # Orion's Config folder, however written
 _FIRST_PARTY_OK = {"Brain.Gemini", "Brain"}       # `from Brain import Gemini`
 _NETWORK = {"requests", "urllib", "http", "socket", "aiohttp", "httpx", "websocket", "websockets"}
 
@@ -104,55 +136,140 @@ def ScanCode(code: str, name: str = "") -> Scan:
         return out
     from System.PluginLoader import IsFirstParty
 
+    # Every name an import binds, to what it really is: `import os as o` → o = os,
+    # `from os import system as s` → s = os.system, `from Brain import Gemini` → Gemini = Brain.Gemini.
+    alias: dict[str, str] = {}
     imported: set[str] = set()
     network = writes = False
     for node in ast.walk(tree):
         mods = []
         if isinstance(node, ast.Import):
             mods = [a.name for a in node.names]
+            for a in node.names:
+                if a.asname:
+                    alias[a.asname] = a.name
+                else:
+                    alias[a.name.split(".")[0]] = a.name.split(".")[0]
         elif isinstance(node, ast.ImportFrom):
             if node.level:
                 out.problems.append("it uses a relative import")
-            mods = [node.module or ""]
-            if node.module == "Brain":
+            mod = node.module or ""
+            mods = [mod]
+            for a in node.names:
+                if a.name == "*":
+                    out.problems.append(f"it uses `from {mod} import *`")
+                    continue
+                alias[a.asname or a.name] = f"{mod}.{a.name}"
+                mods.append(f"{mod}.{a.name}")
+            if mod == "Brain":
                 bad = [a.name for a in node.names if a.name != "Gemini"]
                 if bad:
                     out.problems.append(f"it imports {', '.join(bad)} from Brain (only Gemini is allowed)")
-        for m in mods:
+            if mod == "Brain.Gemini":
+                bad = [a.name for a in node.names if a.name not in _GEMINI_OK]
+                if bad:
+                    out.problems.append(f"it imports {', '.join(bad)} from Brain.Gemini (only {', '.join(sorted(_GEMINI_OK))})")
+        for m in dict.fromkeys(mods):
             top = m.split(".")[0]
+            first = top not in imported
             imported.add(top)
             if top in _BANNED_IMPORTS:
                 out.problems.append(f"it imports {top}, which skills may not use")
             elif IsFirstParty(top, PLUGINS_DIR):
-                if m not in _FIRST_PARTY_OK:
+                if m not in _FIRST_PARTY_OK and not m.startswith("Brain.Gemini."):
                     out.problems.append(f"it imports {m} from Orion itself (only Brain.Gemini is allowed)")
-            elif not _Installed(top):
+            elif first and not _Installed(top):
                 out.problems.append(f"it needs {top}, which isn't installed")
             if top in _NETWORK:
                 network = True
+
+    def Qual(n) -> str:
+        """`o.system` → 'os.system' with imports resolved; '' when it isn't a dotted name that starts at
+        an import (local variables don't count)."""
+        if isinstance(n, ast.Name):
+            return alias.get(n.id, "")
+        if isinstance(n, ast.Attribute):
+            base = Qual(n.value)
+            return f"{base}.{n.attr}" if base else ""
+        return ""
+
+    def Banned(q: str) -> str:
+        """Why the dotted name `q` is off limits, or ''. Also catches it reached through another module
+        (`pathlib.os.system`, `Gemini.os.remove`)."""
+        parts = q.split(".")
+        for i, p in enumerate(parts):
+            if p in _BANNED_IMPORTS and i > 0:
+                return f"it reaches {p} through another module"
+            tail = ".".join(parts[i:])
+            if tail in _BANNED_CALLS:
+                return f"it uses {tail}"
+            if p == "shutil" and len(parts) > i + 1 and tail not in _SHUTIL_OK:
+                return f"it uses {tail}"
+        if q.startswith("Brain.Gemini.") and parts[2] not in _GEMINI_OK:
+            return f"it uses Brain.Gemini.{parts[2]} (only {', '.join(sorted(_GEMINI_OK))})"
+        return ""
+
+    def Folded(n) -> str:
+        """Every string piece inside an expression, joined: 'Con' + 'fig/' + x reads as 'Config/'."""
+        return "".join(c.value for c in ast.walk(n) if isinstance(c, ast.Constant) and isinstance(c.value, str))
+
+    def CheckText(s: str) -> None:
+        low = s.lower()
+        hit = next((t for t in _BANNED_TEXT if t in low), None)
+        if hit:
+            out.problems.append(f"it mentions {hit}, which skills may not touch")
+        elif _CONFIG_DIR.search(low.strip()) or low.strip(" /\\") == "config":
+            out.problems.append("it reaches into Orion's Config folder, which skills may not touch")
+        if re.search(r"\{[^{}]*\.__", s):
+            out.problems.append("it reaches into an object's insides through a format string")
+
+    # Names used as `x.attr` (so a bare use of a module can be told apart).
+    owners = {id(n.value) for n in ast.walk(tree) if isinstance(n, ast.Attribute)}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name):
+            if node.id in _BANNED_NAMES:
+                out.problems.append(f"it uses {node.id}")
+            q = alias.get(node.id, "")
+            if q:
+                why = Banned(q)
+                if why:
+                    out.problems.append(why)
+                if q in _NO_BARE and id(node) not in owners:
+                    out.problems.append(f"it passes the {q} module around")
+            if node.id.startswith("__") and node.id.endswith("__") and node.id not in _DUNDERS_OK:
+                out.problems.append(f"it reaches into {node.id}")
+        if isinstance(node, ast.Attribute):
+            if node.attr.startswith("__") and node.attr.endswith("__") and node.attr not in _DUNDERS_OK:
+                out.problems.append(f"it reaches into {node.attr}")
+            q = Qual(node)
+            why = Banned(q) if q else ""
+            if why:
+                out.problems.append(why)
+            if node.attr in _BANNED_ATTRS:
+                out.problems.append(f"it uses .{node.attr}")
+            need = _ATTR_NEEDS_MODULE.get(node.attr)
+            if need is not None:
+                owner = Qual(node.value)
+                if owner and owner.split(".")[-1] in need:
+                    out.problems.append(f"it calls {owner.split('.')[-1]}.{node.attr}()")
         if isinstance(node, ast.Call):
             f = node.func
             if isinstance(f, ast.Name) and f.id in _BANNED_NAMES:
                 out.problems.append(f"it calls {f.id}()")
-            if isinstance(f, ast.Attribute) and f.attr in _BANNED_ATTRS:
-                owner = f.value.id if isinstance(f.value, ast.Name) else ""
-                need = _ATTR_NEEDS_MODULE.get(f.attr)
-                if need is None or owner in need:
-                    out.problems.append(f"it calls {(owner + '.') if owner else ''}{f.attr}()")
-            if isinstance(f, ast.Attribute) and f.attr in ("write_text", "write_bytes"):
+            if isinstance(f, ast.Attribute) and f.attr in ("write_text", "write_bytes", "mkdir", "touch"):
                 writes = True
             if isinstance(f, ast.Name) and f.id == "open":
                 mode = node.args[1] if len(node.args) > 1 else next(
                     (k.value for k in node.keywords if k.arg == "mode"), None)
+                if mode is not None and not isinstance(mode, ast.Constant):
+                    out.problems.append("it opens a file with a mode worked out at run time")
                 if isinstance(mode, ast.Constant) and any(c in str(mode.value) for c in "wax+"):
                     writes = True
-        if isinstance(node, ast.Attribute) and node.attr in ("__subclasses__", "__globals__", "__builtins__", "__code__"):
-            out.problems.append(f"it reaches into {node.attr}")
+            CheckText(Folded(node))
+        if isinstance(node, (ast.BinOp, ast.JoinedStr)):
+            CheckText(Folded(node))
         if isinstance(node, ast.Constant) and isinstance(node.value, str):
-            low = node.value.lower()
-            hit = next((t for t in _BANNED_TEXT if t in low), None)
-            if hit:
-                out.problems.append(f"it mentions {hit}, which skills may not touch")
+            CheckText(node.value)
 
     plugin = next((n for n in tree.body if isinstance(n, ast.Assign)
                    and any(isinstance(t, ast.Name) and t.id == "PLUGIN" for t in n.targets)), None)
@@ -263,7 +380,8 @@ Rules:
   use free public endpoints that need none, with timeout=10.
 - To ask an AI model something: `from Brain import Gemini` then `Gemini.text(prompt, tier=Gemini.FAST)`.
 - Never run programs, delete or move files, edit the registry, use eval/exec, or read anything in
-  Orion's Config folder.
+  Orion's Config folder. Don't use getattr/setattr/vars, os.environ, shutil, sockets, __file__ or
+  other __dunder__ names: the safety check refuses them.
 Reply with ONLY this JSON:
 {{"name": "<snake_case>", "code": "<the whole file>", "example": {{<parameters for one test call>}},
   "summary": "<one plain sentence: what the skill does>"}}
@@ -303,8 +421,9 @@ def _Name(raw: str) -> str:
 
 def Draft(goal: str, name: str = "", taken: set[str] = frozenset(),
           ask: Optional[Callable[[str], Optional[dict]]] = None,
-          test: Callable[[str, dict], tuple[bool, str]] = TestRun) -> Skill | str:
-    """A scanned and tested skill for `goal`, or a sentence saying why not."""
+          test: Optional[Callable[[str, dict], tuple[bool, str]]] = None) -> Skill | str:
+    """A scanned skill for `goal`, or a sentence saying why not. Model code never runs here: the
+    test run waits for the user's yes (Run). `test` is only for callers that already have it."""
     goal = (goal or "").strip()
     if len(goal) < 6:
         return "Say what the new skill should do."
@@ -338,7 +457,7 @@ def Draft(goal: str, name: str = "", taken: set[str] = frozenset(),
                 why = "; ".join(scan.problems[:4])
             else:
                 example = reply.get("example") if isinstance(reply.get("example"), dict) else {}
-                passed, answer = test(code, example)
+                passed, answer = test(code, example) if test is not None else (True, "")
                 if passed:
                     return Skill(skill_name, code, str(reply.get("summary") or "").strip() or goal,
                                  example, answer, scan.uses, goal)
@@ -426,10 +545,22 @@ TOOL = {
 _busy = threading.Lock()
 
 
+def TestAndInstall(skill: Skill, registry, after: Callable[[], None] = lambda: None,
+                   test: Callable[[str, dict], tuple[bool, str]] = TestRun) -> str:
+    """After the user's yes: the one test run, then (only if it worked) the install."""
+    passed, answer = test(skill.code, skill.example)
+    if not passed:
+        return f"The skill {skill.name} failed its test run ({answer}), so I didn't add it."
+    skill.answer = answer
+    return Install(skill, registry, after) + f" Its test run answered: {answer[:200]}"
+
+
 def Run(args: dict, registry, show: Callable[[str, str], None], say: Callable[[str], None],
-        after: Callable[[], None] = lambda: None, draft: Callable[..., Skill | str] = Draft) -> str:
+        after: Callable[[], None] = lambda: None, draft: Callable[..., Skill | str] = Draft,
+        test: Callable[[str, dict], tuple[bool, str]] = TestRun) -> str:
     """`skill_forge`. 'forge' works in the background and ends at the
-    confirmation banner, so the reply here only says it started."""
+    confirmation banner, so the reply here only says it started. The model's
+    code is shown and scanned first; it runs (the test) only after the yes."""
     action = str(args.get("action", "forge") or "forge").lower().strip()
     if action in ("list", "history"):
         skills = Forged()
@@ -444,7 +575,11 @@ def Run(args: dict, registry, show: Callable[[str, str], None], say: Callable[[s
         return "Ask the user what the new skill should do."
     if not _busy.acquire(blocking=False):
         return "I'm already building a skill. Tell the user to wait for that one first."
-    taken = (registry.Names() | registry.reserved) if registry is not None else set()
+    try:
+        taken = (registry.Names() | registry.reserved) if registry is not None else set()
+    except Exception as e:
+        _busy.release()                # never left stuck
+        return f"I couldn't read the tool list to start the skill: {e}"
 
     def Told(result: str) -> str:
         say(f"[SKILL_FORGE] {result} Tell the user that in one short sentence.")
@@ -459,11 +594,14 @@ def Run(args: dict, registry, show: Callable[[str, str], None], say: Callable[[s
                 return
             uses = f" Uses {', '.join(skill.uses)}." if skill.uses else ""
             show(f"NEW SKILL — {skill.name}",
-                 f"{skill.summary}{uses}\nTest run answered: {skill.answer}\n\n{skill.code}")
+                 f"{skill.summary}{uses}\nNot run yet: on your yes it is test-run once, and added only "
+                 f"if that works.\n\n{skill.code}")
             said = Confirm.request("skill_forge", f"Add the skill '{skill.name}'?",
-                                   f"{skill.summary}{uses} The code is in the panel below.",
-                                   lambda s=skill: Told(Install(s, registry, after)))
-            say(f"[SKILL_FORGE] The skill {skill.name} is built and passed its test: {skill.summary} {said}")
+                                   f"{skill.summary}{uses} The code is in the panel below. Confirm to "
+                                   f"test-run it and add it.",
+                                   lambda s=skill: Told(TestAndInstall(s, registry, after, test)))
+            say(f"[SKILL_FORGE] The skill {skill.name} is written and passed the safety check: "
+                f"{skill.summary} {said}")
         except Exception as e:
             Told(f"Building the skill failed: {e}")
         finally:

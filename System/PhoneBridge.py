@@ -35,6 +35,8 @@ WAIT_S = 20                    # Orion's long wait for work from the phone (Link
 BACKOFF_S = (30, 60, 120, 240, 300)
 CARD_EVERY_S = 300             # the card is sent again this often, and at once when muted / speaking change
 STATUS_EVERY_S = 30            # Link's status (is JARVIS running on the phone?) is asked this often
+MAX_FRAME = 8 * 1024 * 1024    # a reply bigger than this isn't Link's
+GARBLED_MAX = 3                # replies in a row that won't open before the pairing is treated as gone
 CAN = ["web_search", "browser", "flights", "dev_agent", "files", "screen", "call_secretary", "reminders"]
 
 _lock = threading.Lock()
@@ -46,6 +48,10 @@ class LinkDown(Exception):
 
 class NotPaired(Exception):
     """Link doesn't know this Orion (never paired, or forgotten on Link's side)."""
+
+
+class Garbled(LinkDown):
+    """A reply that wouldn't decrypt or parse. Once is noise; the pairing is only dropped after several in a row."""
 
 
 # ── storage ─────────────────────────────────────────────────────────────────
@@ -88,7 +94,10 @@ def _Recv(sock: socket.socket) -> Optional[dict]:
     head = Exact(4)
     if head is None:
         return None
-    body = Exact(struct.unpack(">I", head)[0])
+    size = struct.unpack(">I", head)[0]
+    if size > MAX_FRAME:
+        return None                    # not Link's (its frames are small): don't read gigabytes into memory
+    body = Exact(size)
     return json.loads(body.decode("utf-8")) if body is not None else None
 
 
@@ -187,9 +196,12 @@ def Sealed(op: str, timeout: float = 8, **fields) -> dict:
             raise NotPaired()
         raise LinkDown(str(r.get("error")))
     try:
-        return _Open(key, r["box"], b"orion-reply:" + d["link_id"].encode())
+        out = _Open(key, r["box"], b"orion-reply:" + d["link_id"].encode())
     except Exception as e:
-        raise NotPaired() from e
+        raise Garbled("a reply that wouldn't open") from e
+    if not isinstance(out, dict):
+        raise Garbled("a reply that isn't a frame")
+    return out
 
 
 # ── the running connection ──────────────────────────────────────────────────
@@ -214,6 +226,7 @@ class Bridge:
         self.tasks = None              # System.PhoneTasks.PhoneTasks: what to do with the phone's requests
         self.together = None           # System.Together.Together: the phone's news (Phase 4)
         self.confirm_id = ""           # Orion's confirmation shown on the phone too, if any
+        self.confirm_pid = 0           # Brain.Confirm's id for it: the phone's answer resolves only that one
         self._gate = None
         self._answered_from_phone = ""
         self.no_mirror = False         # a question that came FROM the phone is never sent back to it
@@ -274,7 +287,7 @@ class Bridge:
         self._card_sent = (state, time.time())
 
     def _Loop(self) -> None:
-        fails = 0
+        fails = garbled = 0
         while not self._stop.is_set():
             if not Load():
                 self._Set(False, self.note)
@@ -291,8 +304,22 @@ class Bridge:
                         self.together.OnConnected()   # one shared memory: both send everything on connect
                     fails = 0
                 r = Sealed("wait", timeout=WAIT_S + 15, wait_s=WAIT_S)
+                garbled = 0
                 for task in (r.get("data") or {}).get("tasks", []):
                     self.OnTask(task)
+            except Garbled as e:
+                # One bad reply is noise: only several in a row mean the key no longer matches Link's.
+                garbled += 1
+                if garbled >= GARBLED_MAX and Load():
+                    garbled = 0
+                    Save(None)
+                    self._Set(False, "JARVIS Link's replies stopped matching the pairing. Connect again with a new code.")
+                    continue
+                self._Set(False, f"Link error: {e}")
+                delay = BACKOFF_S[min(fails, len(BACKOFF_S) - 1)]
+                fails += 1
+                self._wake.wait(delay)
+                self._wake.clear()
             except NotPaired:
                 if Load():  # not our own Disconnect: Link forgot us (or its folder was reset)
                     Save(None)
@@ -371,28 +398,46 @@ class Bridge:
         gate.bind(Show, Hide, Log)
 
     def _MirrorShow(self, title: str, detail: str) -> None:
+        self._MirrorHide()             # an older question still on the phone is taken down first
         if self.no_mirror:
             return
         busy = getattr(self.tasks, "running", 0) > 0
         if not self.connected or not (busy or IdleSeconds() >= AWAY_S):
             return
+        pid = self._PendingId()
+        if pid == 0:
+            return
         cid = "c-" + secrets.token_hex(6)
-        self.confirm_id = cid
+        self.confirm_id, self.confirm_pid = cid, pid
         threading.Thread(target=lambda: _Quiet(lambda: Sealed("confirm", id=cid, title=title, text=detail)),
                          daemon=True).start()
 
     def _MirrorHide(self) -> None:
-        cid, self.confirm_id = self.confirm_id, ""
+        cid, self.confirm_id, self.confirm_pid = self.confirm_id, "", 0
         if cid:
             threading.Thread(target=lambda: _Quiet(lambda: Sealed("confirm_done", id=cid)), daemon=True).start()
 
     def _ConfirmAnswer(self, task: dict) -> None:
         gate = self._gate
-        if not gate or not self.confirm_id or task.get("id") != self.confirm_id or not gate.PendingTitle():
+        if not gate or not self.confirm_id or task.get("id") != self.confirm_id:
             return                     # an old question, or already answered at the laptop
+        pid = self.confirm_pid
+        if pid is None:                # a gate without ids (tests' stand-in): just check one is waiting
+            if not gate.PendingTitle():
+                return
+        elif not pid or self._PendingId() != pid:
+            return                     # the waiting confirmation isn't the one the phone was shown
         self._answered_from_phone = self.confirm_id if task.get("yes") else ""
         print(f"[PhoneBridge] confirmation answered on the phone: {'yes' if task.get('yes') else 'no'}")
-        gate.resolve(bool(task.get("yes")))
+        if pid is None:
+            gate.resolve(bool(task.get("yes")))
+        else:
+            gate.resolve(bool(task.get("yes")), pid=pid)
+
+    def _PendingId(self) -> Optional[int]:
+        """The gate's waiting confirmation id (0: none); None when the gate has no ids."""
+        fn = getattr(self._gate, "PendingId", None)
+        return int(fn() or 0) if fn is not None else None
 
     def Status(self) -> tuple[str, Optional[bool]]:
         """The settings page's status line: (words, connected?)."""

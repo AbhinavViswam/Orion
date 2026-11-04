@@ -6,6 +6,7 @@ import concurrent.futures
 import importlib.util
 import os
 import platform
+import re
 import shutil
 import subprocess
 import threading
@@ -88,13 +89,23 @@ def NormalizeUrl(url: str) -> str:
     """
     Bare words like "instagram" → "https://instagram.com"
     Domains like "instagram.com" → "https://instagram.com"
-    Full URLs pass through unchanged.
+    Full http/https URLs pass through unchanged.
+    Anything else (file://, custom protocols, "--flags") raises ValueError.
     """
     url = url.strip()
     if not url:
         return "about:blank"
+    if url.lower() == "about:blank":
+        return "about:blank"
+    if url.startswith("-"):
+        raise ValueError("that address looks like a command-line option, not a web page")
     if "://" in url:
+        if url.split("://", 1)[0].lower() not in ("http", "https"):
+            raise ValueError("only http and https web addresses can be opened")
         return url
+    # "javascript:..." / "file:..." style schemes without slashes.
+    if re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*:(?!\d)", url):
+        raise ValueError("only http and https web addresses can be opened")
     # No dot at all → assume .com  (e.g. "instagram" → "instagram.com")
     if "." not in url:
         url = url + ".com"
@@ -439,7 +450,10 @@ def OpenNative(url: str, browser_name: Optional[str]) -> str:
     session restore) — exactly as if the user had opened it themselves.
     Works on all three of Windows / macOS / Linux.
     """
-    url = NormalizeUrl(url) if url and url.strip() else ""
+    try:
+        url = NormalizeUrl(url) if url and url.strip() else ""
+    except ValueError as e:
+        return Outcome.failed("browser_control", str(e))
     if url == "about:blank":
         url = ""
 
@@ -1133,7 +1147,8 @@ def BrowserControl(
             nav_url = params.get("url", "").strip()
 
         result = OpenNative(nav_url, browser)
-        if result.startswith("Opened") and nav_url:
+        # Unverified opens count too (os.startfile can't report back).
+        if nav_url and not result.startswith(f"status={Outcome.FAILED}"):
             _registry.NoteNativeUrl(NormalizeUrl(nav_url))
         _log(player, result)
         return result

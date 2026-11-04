@@ -174,11 +174,74 @@ def UserProfile() -> dict:
         pass
     return {}
 
+def _WinUnicodeType(text: str, interval: float = 0.0) -> bool:
+    """Type any characters on Windows with SendInput (KEYEVENTF_UNICODE)."""
+    if platform.system() != "Windows":
+        return False
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class KEYBDINPUT(ctypes.Structure):
+            _fields_ = [("wVk", wintypes.WORD), ("wScan", wintypes.WORD),
+                        ("dwFlags", wintypes.DWORD), ("time", wintypes.DWORD),
+                        ("dwExtraInfo", ctypes.c_size_t)]
+
+        class _U(ctypes.Union):
+            # Sized like the biggest member (MOUSEINPUT) so cbSize is right.
+            _fields_ = [("ki", KEYBDINPUT), ("pad", ctypes.c_byte * 32)]
+
+        class INPUT(ctypes.Structure):
+            _fields_ = [("type", wintypes.DWORD), ("u", _U)]
+
+        send = ctypes.windll.user32.SendInput
+        data = text.replace("\r\n", "\n").encode("utf-16-le")
+        for i in range(0, len(data), 2):
+            unit = int.from_bytes(data[i:i + 2], "little")
+            for flags in (0x0004, 0x0004 | 0x0002):     # UNICODE, then UNICODE|KEYUP
+                inp = INPUT(type=1)
+                inp.u.ki = KEYBDINPUT(0, unit, flags, 0, 0)
+                if send(1, ctypes.byref(inp), ctypes.sizeof(INPUT)) != 1:
+                    return False
+            if interval:
+                time.sleep(interval)
+        return True
+    except Exception as e:
+        print(f"[ComputerControl] unicode typing failed: {e}")
+        return False
+
+
+def _TypeText(text: str, interval: float) -> str:
+    """typewrite drops non-ASCII; paste or SendInput those instead. Returns how."""
+    if text.isascii():
+        pyautogui.typewrite(text, interval=interval)
+        return ""
+    if RequirePyperclip():
+        try:
+            old = pyperclip.paste()
+        except Exception:
+            old = None
+        pyperclip.copy(text)
+        time.sleep(0.1)
+        pyautogui.hotkey("command" if _GetOs() == "mac" else "ctrl", "v")
+        time.sleep(0.2)
+        if old is not None:
+            try:
+                pyperclip.copy(old)
+            except Exception:
+                pass
+        return " (clipboard)"
+    if _WinUnicodeType(text, interval):
+        return ""
+    pyautogui.typewrite(text, interval=interval)
+    return " (some non-English characters could not be typed)"
+
+
 def _Type(text: str, interval: float = 0.03) -> str:
     RequirePyautogui()
     time.sleep(0.3)
-    pyautogui.typewrite(text, interval=interval)
-    return f"Typed: {text[:60]}{'…' if len(text) > 60 else ''}"
+    how = _TypeText(text, interval)
+    return f"Typed{how}: {text[:60]}{'…' if len(text) > 60 else ''}"
 
 
 def _SmartType(text: str, clear_first: bool = True) -> str:
@@ -194,8 +257,8 @@ def _SmartType(text: str, clear_first: bool = True) -> str:
         pyautogui.hotkey(paste_key, "v")
         return f"Smart-typed (clipboard): {text[:60]}{'…' if len(text) > 60 else ''}"
 
-    pyautogui.typewrite(text, interval=0.04)
-    return f"Smart-typed: {text[:60]}{'…' if len(text) > 60 else ''}"
+    how = _TypeText(text, 0.04)
+    return f"Smart-typed{how}: {text[:60]}{'…' if len(text) > 60 else ''}"
 
 
 def _Click(x=None, y=None, button: str = "left", clicks: int = 1) -> str:
@@ -280,20 +343,26 @@ def FocusWindow(title: str) -> str:
 
     if os_name == "windows":
         try:
-            script = f'(New-Object -ComObject WScript.Shell).AppActivate("{title}")'
-            subprocess.run(
+            # The title goes in through an env var, never into the script text.
+            import os
+            script = '(New-Object -ComObject WScript.Shell).AppActivate($env:ORION_FOCUS_TITLE)'
+            env = dict(os.environ, ORION_FOCUS_TITLE=str(title))
+            result = subprocess.run(
                 ["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
-                capture_output=True, timeout=5, **_WIN_HIDE,
+                capture_output=True, text=True, timeout=5, env=env, **_WIN_HIDE,
             )
+            if (result.stdout or "").strip().lower() != "true":
+                return f"Could not find a window called '{title}' to focus."
             time.sleep(0.3)
             return f"Focused window: {title}"
         except Exception as e:
             return f"focus_window (Windows) failed: {e}"
 
     if os_name == "mac":
+        safe = str(title).replace("\\", "\\\\").replace('"', '\\"')
         script = (
             f'tell application "System Events" to '
-            f'set frontmost of (first process whose name contains "{title}") to true'
+            f'set frontmost of (first process whose name contains "{safe}") to true'
         )
         try:
             subprocess.run(

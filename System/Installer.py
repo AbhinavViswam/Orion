@@ -60,6 +60,9 @@ _TTS: dict[str, list[tuple[str, str]]] = {
 
 # ── Helpers ───────────────────────────────────────────────────────────────
 
+PIP_TIMEOUT_S = 15 * 60          # one package (torch-sized ones are slow, but never forever)
+BROWSER_TIMEOUT_S = 20 * 60      # the Chromium download
+
 def _Available(module: str) -> bool:
     """Return True if the module can be imported (no actual import)."""
     return importlib.util.find_spec(module) is not None
@@ -68,13 +71,18 @@ def _Available(module: str) -> bool:
 def Pip(package: str, log: Callable | None = None) -> bool:
     if log:
         log(f"SYS: pip install {package} …")
-    result = subprocess.run(
-        [
-            sys.executable, "-m", "pip", "install", package,
-            "--quiet", "--disable-pip-version-check",
-        ],
-        capture_output=True,
-    )
+    try:
+        result = subprocess.run(
+            [
+                sys.executable, "-m", "pip", "install", package,
+                "--quiet", "--disable-pip-version-check",
+            ],
+            capture_output=True, timeout=PIP_TIMEOUT_S,
+        )
+    except subprocess.TimeoutExpired:
+        if log:
+            log(f"ERR: {package} install took over {PIP_TIMEOUT_S // 60} minutes, so I stopped it.")
+        return False
     ok = result.returncode == 0
     if not ok and log:
         stderr = result.stderr.decode(errors="replace").strip()
@@ -127,12 +135,17 @@ def InstallForConfig(config: dict, log: Callable | None = None) -> None:
         Pip("playwright", log)
         if log:
             log("SYS: Downloading Playwright browser (Chromium, ~150 MB — one-time)…")
-        subprocess.run(
-            [sys.executable, "-m", "playwright", "install", "chromium"],
-            capture_output=True,
-        )
+        try:
+            r = subprocess.run(
+                [sys.executable, "-m", "playwright", "install", "chromium"],
+                capture_output=True, timeout=BROWSER_TIMEOUT_S,
+            )
+            ready = r.returncode == 0
+        except subprocess.TimeoutExpired:
+            ready = False
         if log:
-            log("SYS: Playwright browser ready.")
+            log("SYS: Playwright browser ready." if ready else
+                "ERR: The Playwright browser download didn't finish. It's tried again next time.")
 
     if log:
         log("SYS: All dependencies ready ✓")

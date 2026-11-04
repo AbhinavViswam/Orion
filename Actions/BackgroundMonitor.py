@@ -29,7 +29,11 @@ def IsBlocked(topic: str) -> bool:
 # ── Slug / hash helpers ────────────────────────────────────────────────────────
 
 def Slug(topic: str) -> str:
-    return re.sub(r"[^a-z0-9]+", "_", topic.lower().strip())[:40].strip("_")
+    # \w keeps non-Latin letters, so "東京" doesn't collapse to "".
+    slug = re.sub(r"\W+", "_", topic.lower().strip())[:40].strip("_")
+    if not slug:
+        slug = "t_" + hashlib.md5(topic.strip().encode("utf-8")).hexdigest()[:10]
+    return slug
 
 def TitleHash(title: str) -> str:
     return hashlib.md5(title.encode("utf-8", errors="ignore")).hexdigest()[:12]
@@ -43,19 +47,43 @@ def _load() -> dict:
     return data if isinstance(data, dict) else {}
 
 def _Save(monitors: dict) -> None:
-    from Brain.Memory import LoadMemory, MEMORY_PATH, _lock
-    memory = LoadMemory()
-    memory["monitors"] = monitors
-    with _lock:
-        MEMORY_PATH.parent.mkdir(parents=True, exist_ok=True)
-        MEMORY_PATH.write_text(
-            json.dumps(memory, indent=2, ensure_ascii=False),
-            encoding="utf-8",
-        )
+    # Load, change and save under Memory's lock; SaveMemory writes atomically.
+    from Brain import Memory
+    with Memory._lock:
+        memory = Memory.LoadMemory()
+        memory["monitors"] = monitors
+        Memory.SaveMemory(memory)
+
+
+def _SaveChecks(checked: dict) -> None:
+    """Write check results onto the CURRENT monitors (checks run unlocked, over
+    the network), so a topic added or removed meanwhile isn't lost or revived."""
+    from Brain import Memory
+    with Memory._lock:
+        current = _load()
+        for slug, data in checked.items():
+            if slug in current:
+                for k in ("last_check", "last_hash"):
+                    if k in data:
+                        current[slug][k] = data[k]
+        _Save(current)
+
+
+def _WithMemoryLock(fn):
+    """Hold Memory's lock across a whole read-modify-write."""
+    import functools
+
+    @functools.wraps(fn)
+    def Wrapper(*a, **kw):
+        from Brain import Memory
+        with Memory._lock:
+            return fn(*a, **kw)
+    return Wrapper
 
 
 # ── Public API ─────────────────────────────────────────────────────────────────
 
+@_WithMemoryLock
 def AddMonitor(topic: str) -> str:
     topic = topic.strip()
     if not topic:
@@ -77,6 +105,7 @@ def AddMonitor(topic: str) -> str:
     return f"Now monitoring: {topic}"
 
 
+@_WithMemoryLock
 def RemoveMonitor(topic: str) -> str:
     topic = topic.strip().lower()
     monitors = _load()
@@ -154,6 +183,6 @@ def CheckAll() -> list[str]:
             print(f"[Monitor] ⚠️ Check failed for '{topic}': {e}")
 
     if changed:
-        _Save(monitors)
+        _SaveChecks(monitors)
 
     return alerts

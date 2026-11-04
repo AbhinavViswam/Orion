@@ -1,5 +1,8 @@
 import json
+import os
 import sys
+import threading
+import time
 from pathlib import Path
 
 def GetBaseDir() -> Path:
@@ -17,31 +20,102 @@ def EnsureConfigDir() -> None:
 def ConfigExists() -> bool:
     return CONFIG_FILE.exists()
 
-def SaveApiKeys(gemini_api_key: str) -> None:
-    EnsureConfigDir()
+# ── Safe reads and writes ────────────────────────────────────────────────────
+# One lock for every read-modify-write, and writes go to a temp file that then
+# replaces the real one, so a reader never sees half a file. If the file still
+# can't be parsed, readers get the last good copy (kept in memory, and on disk
+# as ApiKeys.bak.json) instead of {} — {} would mean privacy off and brain "auto".
+_LOCK = threading.RLock()
+_last_good: dict[str, str] = {}      # path -> text of the last good read or write
 
-    data: dict = {}
-    if CONFIG_FILE.exists():
+
+def AtomicWrite(path: Path, text: str) -> None:
+    """Write `text` to `path` through a temp file + os.replace."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write(text)
+        f.flush()
+        os.fsync(f.fileno())
+    # Windows refuses the replace while another process has the file open; retry briefly.
+    for _ in range(40):
         try:
-            data = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
+            os.replace(tmp, path)
+            return
+        except PermissionError:
+            time.sleep(0.05)
+    try:
+        os.replace(tmp, path)
+    except Exception:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        raise
+
+
+def _BackupPath(path: Path) -> Path:
+    return path.with_name(path.stem + ".bak" + path.suffix)
+
+
+def _ParseObject(text: str) -> dict:
+    data = json.loads(text)
+    if not isinstance(data, dict):
+        raise ValueError("not a JSON object")
+    return data
+
+
+def _Read() -> tuple[dict, bool]:
+    """(config, read OK). On a parse error: the last good copy, then the backup file, then {}."""
+    path = CONFIG_FILE
+    with _LOCK:
+        if not path.exists():
+            return {}, True
+        try:
+            text = path.read_text(encoding="utf-8")
+            data = _ParseObject(text)
+            _last_good[str(path)] = text
+            return data, True
+        except Exception as e:
+            print(f"❌ Failed to load ApiKeys.json: {e} — using the last good copy")
+        good = _last_good.get(str(path))
+        if good is not None:
+            return _ParseObject(good), False
+        try:
+            return _ParseObject(_BackupPath(path).read_text(encoding="utf-8")), False
         except Exception:
-            data = {}
+            return {}, False
 
-    data["gemini_api_key"] = gemini_api_key.strip()
 
-    CONFIG_FILE.write_text(
-        json.dumps(data, indent=2),
-        encoding="utf-8"
-    )
+def _Update(change) -> None:
+    """Read-modify-write the config under the lock. `change(data)` edits the dict in place."""
+    EnsureConfigDir()
+    path = CONFIG_FILE
+    with _LOCK:
+        data, ok = _Read()
+        if not ok and path.exists():
+            # Keep the unreadable file for the user rather than writing over it unseen.
+            try:
+                AtomicWrite(path.with_name(path.stem + ".broken" + path.suffix),
+                            path.read_text(encoding="utf-8", errors="replace"))
+            except Exception:
+                pass
+        change(data)
+        text = json.dumps(data, indent=4)
+        AtomicWrite(path, text)
+        _last_good[str(path)] = text
+        try:
+            AtomicWrite(_BackupPath(path), text)
+        except Exception:
+            pass
+
+
+def SaveApiKeys(gemini_api_key: str) -> None:
+    PatchConfig(gemini_api_key=gemini_api_key.strip())
 
 def LoadApiKeys() -> dict:
-    if not CONFIG_FILE.exists():
-        return {}
-    try:
-        return json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
-    except Exception as e:
-        print(f"❌ Failed to load ApiKeys.json: {e}")
-        return {}
+    return _Read()[0]
 
 def GetGeminiKey() -> str | None:
     return LoadApiKeys().get("gemini_api_key")
@@ -63,16 +137,8 @@ def GetUserName() -> str:
 
 def SaveAssistantConfig(assistant_name: str, user_name: str) -> None:
     """Persist assistant name and user name to config."""
-    EnsureConfigDir()
-    data: dict = {}
-    if CONFIG_FILE.exists():
-        try:
-            data = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
-        except Exception:
-            data = {}
-    data["assistant_name"] = assistant_name.strip() or "ORION"
-    data["user_name"] = user_name.strip()
-    CONFIG_FILE.write_text(json.dumps(data, indent=4), encoding="utf-8")
+    PatchConfig(assistant_name=assistant_name.strip() or "ORION",
+                user_name=user_name.strip())
 
 
 # ── Assistant voice ──────────────────────────────────────────────────────────
@@ -92,16 +158,8 @@ def GetVoice() -> str:
 def SaveVoice(voice_name: str) -> None:
     """Persist the chosen Live voice. Unknown names collapse to the default so a
     bad value can never reach the API and break the session."""
-    EnsureConfigDir()
-    data: dict = {}
-    if CONFIG_FILE.exists():
-        try:
-            data = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
-        except Exception:
-            data = {}
     v = (voice_name or "").strip()
-    data["voice_name"] = v if v in AVAILABLE_VOICES else DEFAULT_VOICE
-    CONFIG_FILE.write_text(json.dumps(data, indent=4), encoding="utf-8")
+    PatchConfig(voice_name=v if v in AVAILABLE_VOICES else DEFAULT_VOICE)
 
 
 # ── The laptop's own voice (Piper: On-device and private mode) ───────────────
@@ -111,15 +169,7 @@ def GetLocalVoice() -> str:
 
 
 def SaveLocalVoice(voice: str) -> None:
-    EnsureConfigDir()
-    data: dict = {}
-    if CONFIG_FILE.exists():
-        try:
-            data = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
-        except Exception:
-            data = {}
-    data["local_voice"] = (voice or "").strip()
-    CONFIG_FILE.write_text(json.dumps(data, indent=4), encoding="utf-8")
+    PatchConfig(local_voice=(voice or "").strip())
 
 
 
@@ -186,18 +236,12 @@ def GetTurnTuning() -> dict:
 
 
 def SaveTurnTuning(values: dict) -> None:
-    EnsureConfigDir()
-    data: dict = {}
-    if CONFIG_FILE.exists():
-        try:
-            data = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
-        except Exception:
-            data = {}
-    cur = data.get("turn_tuning")
-    cur = dict(cur) if isinstance(cur, dict) else {}
-    cur.update(values or {})
-    data["turn_tuning"] = cur
-    CONFIG_FILE.write_text(json.dumps(data, indent=4), encoding="utf-8")
+    def change(data):
+        cur = data.get("turn_tuning")
+        cur = dict(cur) if isinstance(cur, dict) else {}
+        cur.update(values or {})
+        data["turn_tuning"] = cur
+    _Update(change)
 
 
 def GetProactiveAudioEnabled() -> bool:
@@ -236,15 +280,7 @@ def SaveMediaResolution(value: str) -> None:
 
 def SaveFlag(key: str, value) -> None:
     """Read-modify-write one key without disturbing the rest of the config."""
-    EnsureConfigDir()
-    data: dict = {}
-    if CONFIG_FILE.exists():
-        try:
-            data = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
-        except Exception:
-            data = {}
-    data[key] = bool(value) if isinstance(value, bool) else value
-    CONFIG_FILE.write_text(json.dumps(data, indent=4), encoding="utf-8")
+    PatchConfig(**{key: bool(value) if isinstance(value, bool) else value})
 
 
 def GetFastCommandsEnabled() -> bool:
@@ -282,15 +318,7 @@ def GetBriefEnabled() -> bool:
 
 
 def SaveBriefEnabled(enabled: bool) -> None:
-    EnsureConfigDir()
-    data: dict = {}
-    if CONFIG_FILE.exists():
-        try:
-            data = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
-        except Exception:
-            data = {}
-    data["morning_brief_enabled"] = enabled
-    CONFIG_FILE.write_text(json.dumps(data, indent=4), encoding="utf-8")
+    PatchConfig(morning_brief_enabled=enabled)
 
 
 # ── Audio devices ────────────────────────────────────────────────────────────
@@ -306,15 +334,7 @@ def PatchConfig(**fields) -> None:
     Every setter in this file open-coded this. Collapsing it here means a new
     setting is one line, and there is one place where a corrupt config file is
     handled instead of nine."""
-    EnsureConfigDir()
-    data: dict = {}
-    if CONFIG_FILE.exists():
-        try:
-            data = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
-        except Exception:
-            data = {}
-    data.update(fields)
-    CONFIG_FILE.write_text(json.dumps(data, indent=4), encoding="utf-8")
+    _Update(lambda data: data.update(fields))
 
 
 def GetInputDevice() -> str:
@@ -361,39 +381,27 @@ def GetPluginSetting(namespace: str, key: str, default=None):
 def SavePluginConfig(namespace: str, values: dict) -> None:
     """Merge `values` into a namespace's stored config (read-modify-write, like
     every other helper here). Only the provided keys are touched."""
-    EnsureConfigDir()
-    data: dict = {}
-    if CONFIG_FILE.exists():
-        try:
-            data = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
-        except Exception:
-            data = {}
-    pc = data.get("plugin_config")
-    if not isinstance(pc, dict):
-        pc = {}
-    cur = pc.get(namespace)
-    if not isinstance(cur, dict):
-        cur = {}
-    cur.update(values)
-    pc[namespace] = cur
-    data["plugin_config"] = pc
-    CONFIG_FILE.write_text(json.dumps(data, indent=4), encoding="utf-8")
+    def change(data):
+        pc = data.get("plugin_config")
+        if not isinstance(pc, dict):
+            pc = {}
+        cur = pc.get(namespace)
+        if not isinstance(cur, dict):
+            cur = {}
+        cur.update(values)
+        pc[namespace] = cur
+        data["plugin_config"] = pc
+    _Update(change)
 
 
 def SavePluginEnabled(plugin_name: str, enabled: bool) -> None:
-    EnsureConfigDir()
-    data: dict = {}
-    if CONFIG_FILE.exists():
-        try:
-            data = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
-        except Exception:
-            data = {}
-    plugins_cfg = data.get("plugins_enabled")
-    if not isinstance(plugins_cfg, dict):
-        plugins_cfg = {}
-    plugins_cfg[plugin_name] = enabled
-    data["plugins_enabled"] = plugins_cfg
-    CONFIG_FILE.write_text(json.dumps(data, indent=4), encoding="utf-8")
+    def change(data):
+        plugins_cfg = data.get("plugins_enabled")
+        if not isinstance(plugins_cfg, dict):
+            plugins_cfg = {}
+        plugins_cfg[plugin_name] = enabled
+        data["plugins_enabled"] = plugins_cfg
+    _Update(change)
 
 # ── Providers: local STT/LLM/TTS and non-Gemini APIs ─────────────────────────
 # Stored here rather than in a file of their own, for the same reason plugin
@@ -467,9 +475,10 @@ def GetSidecarProvider() -> str:
 
 
 def PatchProviders(**fields) -> None:
-    p = GetProviders()
-    p.update(fields)
-    PatchConfig(providers=p)
+    with _LOCK:
+        p = GetProviders()
+        p.update(fields)
+        PatchConfig(providers=p)
 
 
 def SaveProviderMode(mode: str) -> None:
@@ -482,28 +491,30 @@ def SaveProviderMode(mode: str) -> None:
 def SaveProviderConfig(provider_id: str, values: dict) -> None:
     """Merge settings for one provider. Only the given keys are touched, so the
     panel can save one field without reading and rewriting the rest."""
-    p = GetProviders()
-    creds = p.get("creds")
-    if not isinstance(creds, dict):
-        creds = {}
-    cur = creds.get(provider_id)
-    cur = dict(cur) if isinstance(cur, dict) else {}
-    cur.update(values or {})
-    creds[provider_id] = cur
-    p["creds"] = creds
-    PatchConfig(providers=p)
+    with _LOCK:
+        p = GetProviders()
+        creds = p.get("creds")
+        if not isinstance(creds, dict):
+            creds = {}
+        cur = creds.get(provider_id)
+        cur = dict(cur) if isinstance(cur, dict) else {}
+        cur.update(values or {})
+        creds[provider_id] = cur
+        p["creds"] = creds
+        PatchConfig(providers=p)
 
 
 def SavePipeline(stt: str = None, llm: str = None, tts: str = None) -> None:
     """Set one or more pipeline slots. `None` leaves a slot alone; '' clears it."""
-    p = GetProviders()
-    pipe = p.get("pipeline")
-    pipe = dict(pipe) if isinstance(pipe, dict) else {}
-    for slot, value in (("stt", stt), ("llm", llm), ("tts", tts)):
-        if value is not None:
-            pipe[slot] = str(value).strip()
-    p["pipeline"] = pipe
-    PatchConfig(providers=p)
+    with _LOCK:
+        p = GetProviders()
+        pipe = p.get("pipeline")
+        pipe = dict(pipe) if isinstance(pipe, dict) else {}
+        for slot, value in (("stt", stt), ("llm", llm), ("tts", tts)):
+            if value is not None:
+                pipe[slot] = str(value).strip()
+        p["pipeline"] = pipe
+        PatchConfig(providers=p)
 
 
 def SaveSidecarProvider(provider_id: str) -> None:
@@ -543,14 +554,11 @@ def SaveProviders(mode: str = None, pipeline: dict = None, creds: dict = None,
     `None` leaves a section alone; `creds` is merged per provider so a panel
     that only edited one does not have to send the others.
     """
-    EnsureConfigDir()
-    data: dict = {}
-    if CONFIG_FILE.exists():
-        try:
-            data = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
-        except Exception:
-            data = {}
+    _Update(lambda data: _ApplyProviders(data, mode, pipeline, creds, sidecar,
+                                         sidecar_first, brain))
 
+
+def _ApplyProviders(data: dict, mode, pipeline, creds, sidecar, sidecar_first, brain) -> None:
     block = data.get("providers")
     block = dict(block) if isinstance(block, dict) else {}
 
@@ -581,4 +589,3 @@ def SaveProviders(mode: str = None, pipeline: dict = None, creds: dict = None,
         block["brain"] = b if b in BRAIN_MODES else "auto"
 
     data["providers"] = block
-    CONFIG_FILE.write_text(json.dumps(data, indent=4), encoding="utf-8")

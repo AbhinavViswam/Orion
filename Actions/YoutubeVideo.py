@@ -69,7 +69,9 @@ def OpenUrl(url: str) -> None:
         elif IsLinux():
             subprocess.Popen(["xdg-open", url])
         else:
-            subprocess.Popen(["cmd", "/c", "start", "", url], shell=False)
+            # cmd's start cuts the URL at '&'; startfile hands it over whole.
+            import os
+            os.startfile(url)
     except Exception as e:
         print(f"[YouTube] ⚠️ open_url failed: {e}")
 
@@ -121,12 +123,13 @@ def AskForUrl(prompt_text: str = "YouTube video URL:") -> str | None:
         import tkinter as tk
         from tkinter import simpledialog
 
-        root = tk._default_root
-        if root is None:
-            root = tk.Tk()
-            root.withdraw()
-
-        url = simpledialog.askstring("ORION", prompt_text, parent=root)
+        # A fresh root each time: a Tk root can't be shared across threads.
+        root = tk.Tk()
+        root.withdraw()
+        try:
+            url = simpledialog.askstring("ORION", prompt_text, parent=root)
+        finally:
+            root.destroy()
         return url.strip() if url else None
     except Exception as e:
         print(f"[YouTube] ⚠️ URL dialog failed: {e}")
@@ -137,7 +140,11 @@ def GetTranscript(video_id: str) -> str | None:
     if not _TRANSCRIPT_OK:
         return None
     try:
-        transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
+        # 1.x: instance .list(); older: class method list_transcripts().
+        if hasattr(YouTubeTranscriptApi, "list_transcripts"):
+            transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
+        else:
+            transcript_list = YouTubeTranscriptApi().list(video_id)
         transcript      = None
 
         lang_priority = ["en", "tr", "de", "fr", "es", "it", "pt", "ru", "ja", "ko", "ar", "zh"]
@@ -159,7 +166,10 @@ def GetTranscript(video_id: str) -> str | None:
             return None
 
         fetched = transcript.fetch()
-        return " ".join(entry["text"] for entry in fetched)
+        # 1.x gives snippet objects with .text; older gave dicts.
+        return " ".join(
+            (e["text"] if isinstance(e, dict) else getattr(e, "text", ""))
+            for e in fetched)
 
     except Exception as e:
         print(f"[YouTube] ⚠️ Transcript fetch failed: {e}")

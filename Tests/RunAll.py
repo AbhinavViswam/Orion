@@ -18,7 +18,8 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-PROTECTED = [ROOT / "Config" / "ApiKeys.json", ROOT / "Brain" / "LongTerm.json"]
+PROTECTED = [ROOT / "Config" / "ApiKeys.json", ROOT / "Config" / "ApiKeys.bak.json",
+             ROOT / "Brain" / "LongTerm.json", ROOT / "Brain" / "LongTerm.bak.json"]
 
 
 def Main() -> int:

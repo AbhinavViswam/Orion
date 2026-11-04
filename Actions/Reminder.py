@@ -43,14 +43,41 @@ def Sanitise(text: str, max_len: int = 200) -> str:
             .strip()
     )[:max_len]
 
+# Toast via WinRT. The text comes in through an env var, never the script.
+# AppUserModelID is Windows PowerShell's own, which is always registered.
+_TOAST_PS = (
+    "$ErrorActionPreference = 'Stop';"
+    "[Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] > $null;"
+    "[Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom.XmlDocument, ContentType = WindowsRuntime] > $null;"
+    "$x = [Windows.UI.Notifications.ToastNotificationManager]::GetTemplateContent([Windows.UI.Notifications.ToastTemplateType]::ToastText02);"
+    "$t = $x.GetElementsByTagName('text');"
+    "$t.Item(0).AppendChild($x.CreateTextNode('ORION Reminder')) > $null;"
+    "$t.Item(1).AppendChild($x.CreateTextNode($env:ORION_REMINDER_MSG)) > $null;"
+    "$toast = [Windows.UI.Notifications.ToastNotification]::new($x);"
+    "$app = '{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\\WindowsPowerShell\\v1.0\\powershell.exe';"
+    "[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier($app).Show($toast)"
+)
+
+
 def WriteNotifyScript(task_name: str, message: str, os_name: str) -> Path:
     script_path = ScriptsDir() / f"{task_name}.py"
     msg_literal = json.dumps(message)  
 
     if os_name == "windows":
+        # plyer/win10toast/msg.exe are missing on a normal Win 11 Home, so the
+        # main path is a WinRT toast through Windows PowerShell (no installs),
+        # then a plain message box if even that fails.
         notify_block = f"""
 message = {msg_literal}
 notified = False
+
+try:
+    import winsound, time
+    for freq in [800, 1000, 1200]:
+        winsound.Beep(freq, 180)
+        time.sleep(0.08)
+except Exception:
+    pass
 
 try:
     from plyer import notification
@@ -61,26 +88,22 @@ except Exception:
 
 if not notified:
     try:
-        from win10toast import ToastNotifier
-        ToastNotifier().show_toast("ORION Reminder", message, duration=15, threaded=False)
-        notified = True
+        import subprocess, os
+        env = dict(os.environ, ORION_REMINDER_MSG=message)
+        r = subprocess.run(
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command", {json.dumps(_TOAST_PS)}],
+            env=env, capture_output=True, timeout=30, creationflags=0x08000000)
+        notified = r.returncode == 0
     except Exception:
         pass
 
 if not notified:
     try:
-        import subprocess
-        subprocess.run(["msg", "*", "/TIME:30", message], check=False)
+        import ctypes
+        # MB_OK | MB_ICONINFORMATION | MB_TOPMOST | MB_SETFOREGROUND
+        ctypes.windll.user32.MessageBoxW(None, message, "ORION Reminder", 0x40 | 0x40000 | 0x10000)
     except Exception:
         pass
-
-try:
-    import winsound
-    for freq in [800, 1000, 1200]:
-        winsound.Beep(freq, 180)
-        import time; time.sleep(0.08)
-except Exception:
-    pass
 """
 
     elif os_name == "mac":
@@ -315,7 +338,9 @@ def reminder(
 
     os_name    = _GetOs()
     safe_msg   = Sanitise(message)
-    task_name  = f"ORIONReminder_{target_dt.strftime('%Y%m%d_%H%M%S')}"
+    # A short random tail: two reminders in the same minute must not share a task.
+    import secrets
+    task_name  = f"ORIONReminder_{target_dt.strftime('%Y%m%d_%H%M%S')}_{secrets.token_hex(3)}"
 
     try:
         script_path = WriteNotifyScript(task_name, safe_msg, os_name)

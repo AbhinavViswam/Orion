@@ -234,6 +234,7 @@ MIN_TIMEOUT_MS = 10_000
 
 _key_lock = threading.Lock()
 _cached_key: str | None = None
+_cached_key_mtime: float = -1.0     # the file's mtime when the key was read
 
 # A rung that answered 429 is out of quota, and on the free tier it will stay
 # that way for a while. Retrying it on every single call is a wasted round trip
@@ -322,16 +323,21 @@ def Cooling(model: str) -> bool:
 
 
 def api_key(refresh: bool = False) -> str:
-    """The Gemini key from Config/ApiKeys.json. Cached; never raises."""
-    global _cached_key
+    """The Gemini key from Config/ApiKeys.json. Cached until the file changes; never raises."""
+    global _cached_key, _cached_key_mtime
+    try:
+        mtime = _KEY_FILE.stat().st_mtime
+    except OSError:
+        mtime = -1.0
     with _key_lock:
-        if _cached_key is not None and not refresh:
+        if _cached_key is not None and not refresh and mtime == _cached_key_mtime:
             return _cached_key
         try:
             data = json.loads(_KEY_FILE.read_text(encoding="utf-8"))
             _cached_key = str(data.get("gemini_api_key") or "")
+            _cached_key_mtime = mtime
         except Exception:
-            _cached_key = ""
+            _cached_key = _cached_key or ""     # unreadable now: keep the key we had
         return _cached_key
 
 
@@ -361,8 +367,13 @@ class _Reply:
 
 
 def _LiveModel() -> str:
-    """Whatever Main.py is running, so upgrading the assistant upgrades this."""
-    return getattr(sys.modules.get("main"), "LIVE_MODEL", None) or _LIVE_FALLBACK
+    """Whatever Main.py is running, so upgrading the assistant upgrades this.
+    Main.py runs as __main__ (imported as "Main" by tests)."""
+    for name in ("__main__", "Main"):
+        model = getattr(sys.modules.get(name), "LIVE_MODEL", None)
+        if model:
+            return model
+    return _LIVE_FALLBACK
 
 
 def ToLiveParts(contents) -> list:
@@ -467,21 +478,29 @@ async def LiveTurn(parts: list, system: str, key: str, timeout_s: float) -> str:
         await session.send_client_content(
             turns={"role": "user", "parts": parts}, turn_complete=True)
         chunks: list[str] = []
+        done = {"finished": False}
 
-        async def drain():
+        async def drain(stop_when_finished: bool = False):
             async for resp in session.receive():
                 sc = getattr(resp, "server_content", None)
-                if sc and sc.output_transcription and sc.output_transcription.text:
-                    chunks.append(sc.output_transcription.text)
+                tr = sc.output_transcription if sc else None
+                if tr and tr.text:
+                    chunks.append(tr.text)
+                if tr and getattr(tr, "finished", False):
+                    done["finished"] = True
+                    if stop_when_finished:
+                        return
 
         await asyncio.wait_for(drain(), timeout=timeout_s)
         # The transcription can trail the audio turn by a beat; a short second
         # drain stops a reply being cut mid-token. chat_takeover learned this
-        # the same way and for the same reason.
-        try:
-            await asyncio.wait_for(drain(), timeout=1.5)
-        except asyncio.TimeoutError:
-            pass
+        # the same way and for the same reason. Skipped when the server already
+        # said the transcription is finished (otherwise it always waits 1.5 s).
+        if not done["finished"]:
+            try:
+                await asyncio.wait_for(drain(stop_when_finished=True), timeout=1.5)
+            except asyncio.TimeoutError:
+                pass
         return "".join(chunks).strip()
     finally:
         try:
@@ -524,13 +543,17 @@ def LiveCall(contents, config, timeout_ms: int, key: str):
                 LiveTurn(parts, str(system), key, max(10.0, timeout_ms / 1000.0)))
         except BaseException as e:                     # noqa: BLE001
             box["error"] = e
+        finally:
+            # Freed when the session has really closed, not when the caller stops waiting.
+            _LIVE_SLOTS.release()
 
     try:
         th = threading.Thread(target=runner, daemon=True, name="gemini-live-oneshot")
         th.start()
-        th.join(timeout=max(15.0, timeout_ms / 1000.0 + 20.0))
-    finally:
+    except BaseException:
         _LIVE_SLOTS.release()
+        raise
+    th.join(timeout=max(15.0, timeout_ms / 1000.0 + 20.0))
     if "error" in box:
         raise box["error"]
     text = box.get("text")
@@ -655,24 +678,16 @@ def ToOpenaiMessages(contents, config) -> tuple[list[dict], Optional[float]]:
     return messages, temperature
 
 
-def ProviderCall(model: str, contents, config, timeout_ms: int):
-    """One generation through a configured provider. Raises like every other
-    rung, so the loop's error classification applies to it unchanged."""
-    from Brain.Settings import GetProviderConfig
+def _LocalCall(contents, config, timeout_ms: int):
     from Engines import Registry
+    from System import LocalBrain
+    LocalBrain.StartServer()
+    LocalBrain.EnsureModel()
+    llm = Registry.build(LocalBrain.LLM_ID, LocalBrain.LlmConfig())
+    return _Complete(llm, contents, config, timeout_ms)
 
-    if model == LOCAL_RUNG:
-        from System import LocalBrain
-        LocalBrain.StartServer()
-        LocalBrain.EnsureModel()
-        llm = Registry.build(LocalBrain.LLM_ID, LocalBrain.LlmConfig())
-    else:
-        pid = model[len(PROVIDER_PREFIX):]
-        cfg = GetProviderConfig(pid)
-        missing = Registry.MissingFields(pid, cfg)
-        if missing:
-            raise RuntimeError(f"404 not configured: {', '.join(missing)}")
-        llm = Registry.build(pid, cfg)
+
+def _Complete(llm, contents, config, timeout_ms: int):
     messages, temperature = ToOpenaiMessages(contents, config)
     text_out, _calls = llm.complete(
         messages, tools=None,
@@ -681,6 +696,30 @@ def ProviderCall(model: str, contents, config, timeout_ms: int):
     if not (text_out or "").strip():
         raise RuntimeError("the provider returned an empty answer")
     return _Reply(text_out)
+
+
+def ProviderCall(model: str, contents, config, timeout_ms: int):
+    """One generation through a configured provider. Raises like every other
+    rung, so the loop's error classification applies to it unchanged."""
+    from Brain.Settings import GetProviderConfig
+    from Engines import Registry
+
+    if model == LOCAL_RUNG:
+        from System import LocalBrain
+        if not LocalBrain.ACTIVE:
+            # A one-shot outside a local conversation: let the model go again once idle (M17).
+            LocalBrain.OneShotStarted()
+            try:
+                return _LocalCall(contents, config, timeout_ms)
+            finally:
+                LocalBrain.OneShotDone()
+        return _LocalCall(contents, config, timeout_ms)
+    pid = model[len(PROVIDER_PREFIX):]
+    cfg = GetProviderConfig(pid)
+    missing = Registry.MissingFields(pid, cfg)
+    if missing:
+        raise RuntimeError(f"404 not configured: {', '.join(missing)}")
+    return _Complete(Registry.build(pid, cfg), contents, config, timeout_ms)
 
 
 def call(contents, tier: str = FAST, config=None,

@@ -554,7 +554,7 @@ class OrionLive:
         # reconnect: a dropped connection is not news about Wayland.
         self._platform_notes_shown = False
         self.ui             = ui
-        self._asst_name     = "JARVI    S"   # updated each session from config
+        self._asst_name     = "ORION"   # updated each session from config
         self.session              = None
         self.audio_in_queue       = None
         self.out_queue            = None
@@ -570,6 +570,7 @@ class OrionLive:
         self._vision_last_time     = 0.0     # monotonic time of last screen_process call (cooldown guard)
         self._vision_busy          = False   # True while a vision capture/inject cycle is in flight
         self._interrupted          = False   # True while draining audio after user interrupt
+        self._reply_live           = False   # True from a Live reply's first output until its turn_complete
         # Fast commands (System/FastCommands.py). Per Gemini Live turn: None
         # until the user's words have been checked, then "" (not a command) or
         # the reply of the command already run, so the model's own tool call
@@ -619,6 +620,7 @@ class OrionLive:
         self.ui.on_interrupt      = self.interrupt
         self.ui.on_voice_change   = self.OnVoiceChange     # voice picker → rebuild session
         self.ui.on_audio_device_change = self.OnAudioDeviceChange
+        self.ui.on_quit           = self.OnQuit              # menu/tray quit → save the session summary
         self._reconnect_event: asyncio.Event | None = None
         self._reconnect_keep = True   # False → next rebuild drops the resumption handle
 
@@ -750,7 +752,7 @@ class OrionLive:
         if self._briefing_sent or not self.session or loop is None:
             return
         self._briefing_sent = True
-        asyncio.run_coroutine_threadsafe(self.SendStartupBriefing(), loop)
+        _Watch(asyncio.run_coroutine_threadsafe(self.SendStartupBriefing(), loop), "briefing")
         if self._together is not None:
             self._together.Briefed()
 
@@ -842,6 +844,19 @@ class OrionLive:
         if loop and ev is not None:
             loop.call_soon_threadsafe(ev.set)
 
+    def OnQuit(self) -> None:
+        """Quit from the menu or tray (Qt thread): save the session summary first, but never hold
+        the quit up for more than a few seconds."""
+        loop = self._loop
+        if loop is None or not loop.is_running() or len(self._session_log) < 3:
+            return
+        fut = asyncio.run_coroutine_threadsafe(self._SaveSessionSummary(), loop)
+        try:
+            fut.result(timeout=6)
+        except Exception as e:
+            fut.cancel()
+            print(f"[Memory] session summary not saved at quit: {str(e) or 'timed out'}")
+
     def OnVoiceChange(self):
         """Voice picker applied.
 
@@ -877,8 +892,9 @@ class OrionLive:
 
     def OnTextCommand(self, text: str):
         if not self._loop:
+            self.ui.WriteLog("SYS: Not connected yet — that wasn't sent. Try again in a moment.")
             return
-        asyncio.run_coroutine_threadsafe(self.TypedCommand(text), self._loop)
+        _Watch(asyncio.run_coroutine_threadsafe(self.TypedCommand(text), self._loop), "typed command")
 
     async def TypedCommand(self, text: str) -> None:
         """Something typed in the box: a fast command runs here and now, with
@@ -893,10 +909,17 @@ class OrionLive:
             self._session_log.append(f"User: {text}")
             self._session_log.append(f"{self._asst_name}: {reply}")
             return
-        if self.session:
+        if not self.session:
+            self.ui.WriteLog("SYS: Reconnecting — that wasn't sent. Try again in a moment.")
+            return
+        try:
             await self.session.send_client_content(
                 turns={"role": "user", "parts": [{"text": text}]},
                 turn_complete=True)
+        except Exception as e:
+            print(f"[ORION] typed text not sent: {e}")
+            self.ui.WriteLog("SYS: Couldn't send that (the connection dropped). Try again in a moment.")
+            return
 
     async def RunFastCommand(self, text: str, live: bool = False) -> str | None:
         """Run `text` as a fast command if it is one, and return what to say;
@@ -1029,14 +1052,31 @@ class OrionLive:
                 print(f"[ORION] PTT flush failed: {e}")
         elif self.out_queue is not None:
             try:
-                self._loop.call_soon_threadsafe(
-                    self.out_queue.put_nowait, {"stream_end": True})
+                self._loop.call_soon_threadsafe(self.PutOut, {"stream_end": True})
             except Exception as e:
                 print(f"[ORION] PTT stream end failed: {e}")
 
+    def PutOut(self, msg: dict) -> None:
+        """On the loop: queue something for the sender. When it's full (sender stuck while
+        reconnecting) the oldest mic block is dropped, never a QueueFull error per block."""
+        q = self.out_queue
+        if q is None:
+            return
+        try:
+            q.put_nowait(msg)
+        except asyncio.QueueFull:
+            try:
+                q.get_nowait()
+                q.put_nowait(msg)
+            except (asyncio.QueueEmpty, asyncio.QueueFull):
+                pass
+
     def interrupt(self) -> None:
         """Stop ORION mid-speech: drain queued audio and open mic immediately."""
-        self._interrupted = True
+        # Only drop the rest of a Live reply that is still arriving. If its turn_complete already came
+        # (or this is a private/local line), nothing would clear the flag and the NEXT answer would be lost.
+        if self._engine is None and self._reply_live:
+            self._interrupted = True
         self._interrupts += 1
         if self._talk is not None:
             self._talk.Stop()          # a talk with JARVIS stops too
@@ -1068,13 +1108,13 @@ class OrionLive:
     def Speak(self, text: str):
         if not self._loop or not self.session:
             return
-        asyncio.run_coroutine_threadsafe(
+        _Watch(asyncio.run_coroutine_threadsafe(
             self.session.send_client_content(
                 turns={"role": "user", "parts": [{"text": text}]},
                 turn_complete=True
             ),
             self._loop
-        )
+        ), "spoken line")
 
     def SpeakError(self, tool_name: str, error: str):
         short = str(error)[:120]
@@ -1384,8 +1424,11 @@ class OrionLive:
             # No voice could be made: show it on screen instead (this log never reaches Gemini).
             self.ui.WriteLog(f"SYS: (private) {text}")
             return
+        before = self._interrupts
         try:
             async for pcm in tts.Speak(text):
+                if self._interrupts != before:
+                    return            # a click stopped it: don't refill the drained queue
                 for i in range(0, len(pcm or b""), 4800):
                     q.put_nowait(pcm[i:i + 4800])
         except Exception as e:
@@ -1716,9 +1759,7 @@ class OrionLive:
             if not self.ui.muted and not self._talking:
                 data = indata.tobytes()
                 loop.call_soon_threadsafe(
-                    self.out_queue.put_nowait,
-                    {"data": data, "mime_type": "audio/pcm"}
-                )
+                    self.PutOut, {"data": data, "mime_type": "audio/pcm"})
                 # Feed the live mic level to the HUD so the waveform reacts to
                 # the user's actual voice while listening. Purely cosmetic — any
                 # failure here must never disturb the mic.
@@ -1877,6 +1918,12 @@ class OrionLive:
                                 and response.server_content.output_transcription.text)):
                         await self.CheckFastTurn(" ".join(in_buf))
 
+                    # A reply is in progress until its turn_complete (interrupt() needs to know)
+                    if response.data or response.tool_call or (
+                            response.server_content and response.server_content.output_transcription
+                            and response.server_content.output_transcription.text):
+                        self._reply_live = True
+
                     if response.data:
                         if self._interrupted or self.PhoneTurn():
                             pass  # discard: interrupted, or "Hey JARVIS…" at the desk (the phone answers that one)
@@ -1915,6 +1962,7 @@ class OrionLive:
                             if self._turn_done_event:
                                 self._turn_done_event.set()
                             self._fast_turn = None
+                            self._reply_live = False
 
                             # If this turn_complete ends an interrupted response, clear the
                             # flag and skip all further processing for that turn.
@@ -2165,6 +2213,8 @@ class OrionLive:
 
         # Inject last session context if available — pop removes it so it's never repeated
         last = await asyncio.to_thread(PopLastSession)
+        if last and last.get("local") and not self.LocalSession():
+            last = None            # an on-device chat's summary never goes to Gemini
         session_clause = ""
         if last:
             try:
@@ -2277,8 +2327,11 @@ class OrionLive:
             if not LocalBrain.ACTIVE:
                 LocalBrain.Release()
 
-    async def _SaveSessionSummary(self) -> None:
-        """Summarise the current session in 1-2 sentences and save to LongTerm.json."""
+    async def _SaveSessionSummary(self, local: bool | None = None) -> None:
+        """Summarise the current session in 1-2 sentences and save to LongTerm.json.
+        `local`: the session ran on the laptop's own brain (worked out now when not given)."""
+        if local is None:
+            local = self.LocalSession()
         log = self._session_log
         if len(log) < 3:          # need at least one exchange to be worth saving
             return
@@ -2307,7 +2360,13 @@ class OrionLive:
                     Gemini.text, prompt, Gemini.SMART, None, 30_000,
                 )
             if summary:
-                SaveSessionSummary(summary, lang)
+                if not local:
+                    SaveSessionSummary(summary, lang)
+                elif _TakesArg(SaveSessionSummary, "local"):
+                    SaveSessionSummary(summary, lang, local=True)
+                else:
+                    # An on-device chat stays on the laptop: not put where Gemini's greeting reads it
+                    print("[Memory] on-device session summary not saved (kept away from Gemini).")
         except Exception as e:
             print(f"[Memory] ⚠️ Session summary failed: {e}")
 
@@ -2354,8 +2413,9 @@ class OrionLive:
                         lang   = (lang_e.get("value", "") if isinstance(lang_e, dict) else str(lang_e)).strip() or "English"
                         for alert in alerts:
                             AlertBus.Alert("monitor", *AlertBus.MonitorText(alert))
+                            # Headlines come from the web: fenced like web_search results
                             msg = (
-                                f"{alert}\n\n"
+                                f"{Outcome.Untrusted('web', str(alert))}\n\n"
                                 f"Inform the user about this development naturally in {lang}. "
                                 "One brief sentence only."
                             )
@@ -2696,6 +2756,9 @@ class OrionLive:
                     LocalBrain.ACTIVE = False
                     await asyncio.to_thread(LocalBrain.Release)
 
+                # Clear BEFORE reading the settings: a change made while connecting stays set
+                # and rebuilds the session again, instead of being dropped.
+                self._reconnect_event.clear()
                 self._engine_caps = self.ResolveEngineCaps()
                 LocalBrain.ACTIVE = self.LocalSession()
                 config = self.BuildConfig()
@@ -2737,6 +2800,7 @@ class OrionLive:
                     self._vision_busy          = False
                     self._vision_last_time     = 0.0
                     self._interrupted          = False
+                    self._reply_live           = False
 
                     print("[ORION] Connected.")
                     if _resumed_with:
@@ -2767,7 +2831,6 @@ class OrionLive:
                             print(f"[Platform] capability notes unavailable: {_e}")
 
 
-                    self._reconnect_event.clear()  # ignore requests from before this session
                     tg.create_task(self.WatchReconnect())
                     tg.create_task(self.WatchStall())
                     tg.create_task(self._SendRealtime())
@@ -2902,8 +2965,11 @@ class OrionLive:
                     )
                     continue
 
-                # Invalid API key — stop hammering the API, prompt re-configuration
-                if "API key not valid" in err_str or "1007" in err_str:
+                # Invalid API key — stop hammering the API, prompt re-configuration.
+                # A 1007 alone is any rejected setup (e.g. a bad tool schema), not a bad key.
+                _low = err_str.lower()
+                if "api key not valid" in _low or "api_key_invalid" in _low or (
+                        "1007" in err_str and ("api key" in _low or "api_key" in _low)):
                     if self.FallBackToLocal("The Gemini key was refused"):
                         self.ui.WriteLog("ERR: API key invalid — re-enter it in ⚙ to use Gemini again.")
                         continue
@@ -2913,8 +2979,10 @@ class OrionLive:
                     while not self.ui._win._ready:
                         await asyncio.sleep(1)
                     print("[ORION] New API key saved — reconnecting...")
-                    _conn_backoff = 3
+                    self._conn_backoff = 3
                     continue
+                if "1007" in err_str:
+                    self.ui.WriteLog(f"ERR: Gemini refused the session setup — {err_str[:160]}")
 
                 # Network / timeout errors — log clearly and back off
                 is_net_err = any(k in err_str for k in (
@@ -2940,7 +3008,7 @@ class OrionLive:
                 self.session = None
                 # Only save if there was a real conversation (≥3 turns)
                 if len(self._session_log) >= 3:
-                    asyncio.create_task(self._SaveSessionSummary())
+                    asyncio.create_task(self._SaveSessionSummary(local=self.LocalSession()))
 
             self.SetSpeaking(False)
             self.ui.SetState("SLEEPING")
@@ -2952,6 +3020,28 @@ class OrionLive:
 
 _BUG_TYPES = (AttributeError, KeyError, IndexError, TypeError, NameError, ValueError,
               ZeroDivisionError, AssertionError)
+
+
+def _Watch(fut, what: str):
+    """Log a run_coroutine_threadsafe future that failed, instead of losing it silently."""
+    def Done(f):
+        try:
+            exc = f.exception()
+        except BaseException:          # cancelled
+            return
+        if exc is not None:
+            print(f"[ORION] {what} failed: {exc}")
+    fut.add_done_callback(Done)
+    return fut
+
+
+def _TakesArg(fn, name: str) -> bool:
+    """True when `fn` accepts the keyword `name` (newer Brain/Memory helpers)."""
+    try:
+        import inspect
+        return name in inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        return False
 
 
 def BugTracebacks(e: BaseException) -> list[str]:

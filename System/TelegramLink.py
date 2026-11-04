@@ -142,23 +142,30 @@ def Load() -> dict:
         return {}
 
 
+def _Write(d: dict) -> None:
+    """Callers hold _store_lock."""
+    p = _Store()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    tmp = p.with_suffix(".tmp")
+    tmp.write_text(json.dumps(d, indent=2), "utf-8")
+    tmp.replace(p)
+
+
 def Save(d: dict) -> None:
     with _store_lock:
-        p = _Store()
-        p.parent.mkdir(parents=True, exist_ok=True)
-        tmp = p.with_suffix(".tmp")
-        tmp.write_text(json.dumps(d, indent=2), "utf-8")
-        tmp.replace(p)
+        _Write(d)
 
 
 def Patch(**changes) -> dict:
-    d = Load()
-    for k, v in changes.items():
-        if v is None:
-            d.pop(k, None)
-        else:
-            d[k] = v
-    Save(d)
+    # Load and save under one lock: a poll's offset write can't undo an Unpair.
+    with _store_lock:
+        d = Load()
+        for k, v in changes.items():
+            if v is None:
+                d.pop(k, None)
+            else:
+                d[k] = v
+        _Write(d)
     return d
 
 
@@ -211,8 +218,17 @@ def AlertNow(what: str, title: str, text: str) -> bool:
         token, chat = Token(d), d.get("owner")
         if not token or not chat:
             return False
+        words = AlertWords(what, title, text)
+        # Private mode: like /calls, the words stay on the laptop unless "Send private answers here" is on.
+        try:
+            from Brain import Privacy
+            private = Privacy.Active()
+        except Exception:
+            private = True             # can't tell: keep it on the laptop
+        if private and not Setting("details"):
+            words = "🔒 Orion has a private alert on the laptop. " + PRIVATE_KEPT.split(". ", 1)[1]
         ok = True
-        for part in R.Chunks(AlertWords(what, title, text)):
+        for part in R.Chunks(words):
             if Api.Send(token, int(chat), part) is None:
                 ok = False
                 break
@@ -421,6 +437,11 @@ class Link:
         if late:
             self.Say(R.LateSummary([(m.text, v.minutes) for m, v in late]))
         for m, v in fresh:
+            if v.kind in ("pair", "wrong_code"):
+                # Checked again one guess at a time: wrong guesses earlier in this batch may have withdrawn the code.
+                v = R.GetVerdict(m, Load().get("owner"), self.Code(), now)
+                if v.kind == "stale":
+                    continue
             self.Handle(m, v)
 
     def Handle(self, m: R.Incoming, v: R.Verdict) -> None:
@@ -735,6 +756,8 @@ class Link:
                 words = "✗ No. Nothing was done."
             elif msg.startswith("SYS: Confirmation expired"):
                 words = "Expired. Nothing was done."
+            elif msg.startswith("SYS: Replaced"):
+                words = "Replaced by a newer question. Nothing was done."
             elif msg.startswith("ERR:"):
                 words = "✓ Yes, but it failed: " + msg.split(" — ", 1)[-1][:600]
             if words:

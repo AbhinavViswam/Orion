@@ -378,8 +378,15 @@ def RenameFile(path: str, name: str = "", new_name: str = "") -> str:
             return f"Not found: {target.name}"
         if not new_name:
             return "No new name provided."
+        # A rename stays in the same folder: no paths, no "..".
+        new_name = new_name.strip()
+        if (new_name in (".", "..") or "/" in new_name or "\\" in new_name
+                or ":" in new_name or Path(new_name).is_absolute()):
+            return f"'{new_name}' is not a plain file name. Use move to put it in another folder."
 
         new_path = target.parent / new_name
+        if not IsSafePath(new_path):
+            return f"Access denied: {new_path}"
         if new_path.exists():
             return f"A file named '{new_name}' already exists here."
 

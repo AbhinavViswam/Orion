@@ -307,6 +307,7 @@ def Prepare() -> None:
     """Get everything ready for a local session. Blocking; run it off the event loop.
     Raises NotReady with a sentence for the user."""
     from importlib.util import find_spec
+    _CancelIdleRelease()          # a conversation is starting: no one-shot release now
     if not Installed(refresh=True) and not Running():
         raise NotReady("The laptop's own brain isn't downloaded yet. "
                        "⚙ › Brain › On-device has the download.")
@@ -317,6 +318,54 @@ def Prepare() -> None:
     if missing:
         raise NotReady("The laptop's own brain needs " + " and ".join(missing)
                        + " (pip install " + " ".join(missing) + ").")
+
+
+# ── one-shot calls (Auto mode's fallback, not a conversation) ────────────────
+# Ollama keeps the model loaded (OLLAMA_KEEP_ALIVE -1), which suits a chat but not a single
+# fallback answer. After a one-shot call the model is released once nothing has used it for
+# ONE_SHOT_IDLE_S, unless a local conversation has started meanwhile.
+ONE_SHOT_IDLE_S = 120.0
+_idle_lock = threading.Lock()
+_idle_timer: Optional[threading.Timer] = None
+_one_shots = 0
+
+
+def _CancelIdleRelease() -> None:
+    global _idle_timer
+    with _idle_lock:
+        if _idle_timer is not None:
+            _idle_timer.cancel()
+            _idle_timer = None
+
+
+def OneShotStarted() -> None:
+    global _one_shots
+    _CancelIdleRelease()
+    with _idle_lock:
+        _one_shots += 1
+
+
+def OneShotDone() -> None:
+    """Call after every OneShotStarted(); starts the idle countdown when it was the last one."""
+    global _one_shots, _idle_timer
+    with _idle_lock:
+        _one_shots = max(0, _one_shots - 1)
+        if _one_shots or ACTIVE:
+            return
+        if _idle_timer is not None:
+            _idle_timer.cancel()
+        _idle_timer = threading.Timer(ONE_SHOT_IDLE_S, _ReleaseIfIdle)
+        _idle_timer.daemon = True
+        _idle_timer.start()
+
+
+def _ReleaseIfIdle() -> None:
+    global _idle_timer
+    with _idle_lock:
+        _idle_timer = None
+        if _one_shots or ACTIVE:
+            return
+    Release()
 
 
 def Release() -> None:

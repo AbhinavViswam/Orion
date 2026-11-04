@@ -153,6 +153,9 @@ class PipelineEngine:
         # gave. Cleared when the user speaks again.
         self._done_calls: dict[str, str] = {}
         self._pending_sigs: dict[str, str] = {}
+        # Calls given a placeholder answer because the user spoke first:
+        # id -> name. Their real result is kept as a note when it arrives.
+        self._late_ids: dict[str, str] = {}
         self._rounds = 0
         # Something arrived while a generation was running and still needs an
         # answer once that one is finished.
@@ -234,12 +237,18 @@ class PipelineEngine:
         """
         total, cut = 0, 0
         for i in range(len(self._history) - 1, -1, -1):
-            total += len(json.dumps(self._history[i], ensure_ascii=False))
+            total += _SizeOf(self._history[i])
             if total > self._history_chars:
                 cut = i + 1
                 break
         while cut < len(self._history) and self._history[cut].get("role") == "tool":
             cut += 1
+        # Never trim away the user's latest message, even when it alone is
+        # over budget (a big screenshot): without it the model sees no question.
+        last_user = next((i for i in range(len(self._history) - 1, -1, -1)
+                          if self._history[i].get("role") == "user"), None)
+        if last_user is not None and cut > last_user:
+            cut = last_user
         return self._history[cut:]
 
     # ── the four methods Main.py calls ───────────────────────────────────────
@@ -335,6 +344,17 @@ class PipelineEngine:
         # the MICROPHONE heard and nothing else, so injected text never appears
         # there. The engine matches it — the transcript is emitted where speech
         # is actually recognised, in `flush_microphone`.
+        if self._awaiting:
+            # Tool calls still open: answer them with a placeholder first, or
+            # OpenAI-compatible servers reject the history (400). The real
+            # result, when it comes, is added as a note — see send_tool_response.
+            for call_id, name in self._awaiting.items():
+                self._history.append({
+                    "role": "tool", "tool_call_id": call_id, "name": name,
+                    "content": "Still running - the result was not back yet."})
+                self._late_ids[call_id] = name
+            self._awaiting = {}
+            self._pending_sigs = {}
         self._history.append({"role": "user", "content": content})
         self._done_calls.clear()
         self._rounds = 0
@@ -349,12 +369,23 @@ class PipelineEngine:
             self._tick("tools", time.monotonic() - started)
             self._timing["tool_names"] = ", ".join(
                 sorted(set(self._awaiting.values()))) or ""
+        answered = False
         for fr in function_responses or []:
             call_id = str(getattr(fr, "id", "") or "")
-            name = str(getattr(fr, "name", "") or self._awaiting.get(call_id, ""))
+            name = str(getattr(fr, "name", "") or self._awaiting.get(call_id, "")
+                       or self._late_ids.get(call_id, ""))
             payload = getattr(fr, "response", None)
             if isinstance(payload, dict) and "result" in payload:
                 payload = payload["result"]
+            if call_id in self._late_ids:
+                # Its call already has a placeholder answer. Keep the real
+                # result as a note for the next turn; don't start a new reply.
+                self._late_ids.pop(call_id, None)
+                self._history.append({
+                    "role": "user",
+                    "content": f"[Late tool result] {name}: {_stringify(payload)}"})
+                continue
+            answered = True
             sig = getattr(self, "_pending_sigs", {}).pop(call_id, "")
             if sig:
                 self._done_calls[sig] = _stringify(payload)
@@ -367,7 +398,7 @@ class PipelineEngine:
             self._awaiting.pop(call_id, None)
 
         # Only ask the model again once every call it made has an answer.
-        if not self._awaiting:
+        if answered and not self._awaiting:
             self.StartGeneration()
 
     async def receive(self) -> AsyncIterator[Msg]:
@@ -462,8 +493,11 @@ class PipelineEngine:
         first_word = None
         thinking = _ReasoningFilter()
         pending = ""            # visible text not yet a whole sentence
+        # Past the tool-round cap: no tools offered, so it must answer in text.
+        capped = self._rounds > _MAX_TOOL_ROUNDS
         try:
-            async for ev in self._llm.Chat(self.Messages(), self._tools):
+            async for ev in self._llm.Chat(self.Messages(),
+                                           None if capped else self._tools):
                 if ev.get("text"):
                     visible = thinking.feed(ev["text"])
                     if visible and first_word is None:
@@ -499,10 +533,21 @@ class PipelineEngine:
             text = "".join(said)
 
             # A prompt-mode model answers with JSON instead of a tool-call field.
-            if not calls and self.caps.get("tool_format") == "prompt":
+            if (not calls and not capped
+                    and self.caps.get("tool_format") == "prompt"):
                 parsed = _parse_prompt_call(text, set(self.ToolNames()))
                 if parsed:
                     calls, text = [parsed], ""
+
+            if calls and capped:
+                # Asked for a tool anyway: ignore it and end the turn, so this
+                # can never loop.
+                self._log("SYS: ignoring a tool call after the cap.")
+                calls = []
+                if not text:
+                    text = "Sorry, I couldn't finish that."
+                    await self.Emit(Msg.said(text))
+                    await self._Speak(text)
 
             if calls:
                 self._rounds += 1
@@ -1140,6 +1185,24 @@ def TextOf(content: Any) -> str:
         return "\n".join(p.get("text", "") for p in content
                          if isinstance(p, dict) and p.get("type") == "text").strip()
     return ""
+
+
+# What an image counts for in the history budget. Its base64 length says
+# nothing about what it costs the model, and would push every text out.
+_IMAGE_CHARS = 1_000
+
+
+def _SizeOf(msg: dict) -> int:
+    """A message's size for the history budget, images at a flat cost."""
+    content = msg.get("content")
+    if not isinstance(content, list):
+        return len(json.dumps(msg, ensure_ascii=False))
+    images = sum(1 for p in content
+                 if isinstance(p, dict) and p.get("type") == "image_url")
+    rest = dict(msg)
+    rest["content"] = [p for p in content
+                       if not (isinstance(p, dict) and p.get("type") == "image_url")]
+    return len(json.dumps(rest, ensure_ascii=False)) + images * _IMAGE_CHARS
 
 
 def _stringify(value: Any) -> str:

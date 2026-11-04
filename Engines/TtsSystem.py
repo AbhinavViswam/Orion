@@ -234,6 +234,9 @@ class SystemTTS:
         # apostrophe cannot end the string early.
         voice = self.voice.replace("'", "''")
         select = (f"$s.SelectVoice('{voice}');" if self.voice else "")
+        # Paths quoted the same way ('' inside '...'), e.g. a user named O'Brien.
+        text_file = text_file.replace("'", "''")
+        wav_file = wav_file.replace("'", "''")
         script = (
             "Add-Type -AssemblyName System.Speech;"
             "$s = New-Object System.Speech.Synthesis.SpeechSynthesizer;"

@@ -172,7 +172,8 @@ def installed() -> list[str]:
     """Voices already on disk. Reads the folder, so a voice added by hand or
     left over from a previous run is found without anything being registered."""
     try:
-        return sorted(p.stem for p in _VOICE_DIR.glob("*.onnx"))
+        return sorted(p.stem for p in _VOICE_DIR.glob("*.onnx")
+                      if Complete(p.stem))
     except Exception:
         return []
 
@@ -188,18 +189,63 @@ def LanguageOf(voice: str) -> str:
     return voice.split("_")[0].lower() if voice else ""
 
 
+def Complete(voice: str) -> bool:
+    """Both voice files are on disk and not empty."""
+    for name in (f"{voice}.onnx", f"{voice}.onnx.json"):
+        f = _VOICE_DIR / name
+        try:
+            if not f.is_file() or f.stat().st_size == 0:
+                return False
+        except OSError:
+            return False
+    return True
+
+
+def FetchFile(url: str, target: Path, timeout: float = 30.0) -> None:
+    """Download to a temp file, then move it into place, so a cut-off
+    download never looks like a finished one."""
+    import os
+    import shutil
+    from urllib.request import urlopen
+
+    part = target.with_name(target.name + ".part")
+    try:
+        with urlopen(url, timeout=timeout) as response, open(part, "wb") as out:
+            shutil.copyfileobj(response, out)
+        if part.stat().st_size == 0:
+            raise OSError(f"empty download: {target.name}")
+        os.replace(part, target)
+    finally:
+        try:
+            part.unlink()
+        except OSError:
+            pass
+
+
 def download(voice: str, log=None) -> Path:
     """Fetch one voice. Blocking — callers run it off the interface thread."""
-    from piper.download_voices import download_voice
+    from piper.download_voices import URL_FORMAT, VOICE_PATTERN
 
     _VOICE_DIR.mkdir(parents=True, exist_ok=True)
     target = _VOICE_DIR / f"{voice}.onnx"
-    if target.exists():
+    if Complete(voice):
         return target
+    m = VOICE_PATTERN.match(voice.strip())
+    if not m:
+        raise ValueError(f"not a Piper voice name: {voice!r}")
+    family = m.group("lang_family")
+    args = {"lang_family": family,
+            "lang_code": family + "_" + m.group("lang_region"),
+            "voice_name": m.group("voice_name"),
+            "voice_quality": m.group("voice_quality")}
     if log:
         log(f"SYS: downloading the {voice} voice (about 60 MB, once)")
     t0 = time.monotonic()
-    download_voice(voice, _VOICE_DIR)
+    # Re-fetch any file that is missing or empty (a partial earlier try).
+    for ext in (".onnx", ".onnx.json"):
+        f = _VOICE_DIR / f"{voice}{ext}"
+        if not f.is_file() or f.stat().st_size == 0:
+            FetchFile(URL_FORMAT.format(extension=ext, **args), f)
     if log:
         log(f"SYS: {voice} downloaded in {time.monotonic() - t0:.1f}s")
     return target
@@ -234,7 +280,7 @@ class PiperTTS:
         from piper import PiperVoice
 
         path = _VOICE_DIR / f"{voice}.onnx"
-        if not path.exists():
+        if not Complete(voice):
             # Fetch it rather than refuse.
             #
             # This used to raise, telling the user to open the panel and press
@@ -381,8 +427,8 @@ class PiperTTS:
                            f"{len({LanguageOf(v) for v in Catalog()})} languages."
                            if n else "Choose a voice.")
         try:
-            path = download(self.voice)
-            if not path.exists():
+            download(self.voice)
+            if not Complete(self.voice):
                 return False, f"Could not download {self.voice}."
             t0 = time.monotonic()
             model = self._load(self.voice)
@@ -431,7 +477,7 @@ def prepare(values: dict, report=None) -> None:
     voice = str((values or {}).get("voice") or "").strip()
     if not voice:
         return
-    if (_VOICE_DIR / f"{voice}.onnx").exists():
+    if Complete(voice):
         if report:
             report(True, f"{voice} is ready.")
         return

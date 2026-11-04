@@ -9,6 +9,11 @@ import threading
 from pathlib import Path
 from datetime import datetime
 
+# The daily task runs this file as a script from Actions\, so put the project
+# root on the path or `from Config import` fails.
+if __package__ in (None, ""):
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 from Config import GetOs, IsWindows, IsMac, IsLinux
 
 _CNW: dict = (
@@ -639,6 +644,28 @@ def _SystemShutdown() -> None:
         subprocess.run(["systemctl", "poweroff"])
 
 
+def ArmShutdown(steam_path: Path, speak=None) -> str:
+    """Shutting the PC down is irreversible, so it waits for the on-screen confirm."""
+    from Brain import Confirm
+
+    def Run() -> str:
+        threading.Thread(
+            target=WatchAndShutdown,
+            kwargs={"steam_path": steam_path, "speak": speak},
+            daemon=True
+        ).start()
+        return "Auto-shutdown armed: the PC turns off when the download finishes."
+
+    if Confirm.PendingTitle():
+        return "Auto-shutdown not set: another confirmation is already waiting."
+    return Confirm.request(
+        "game_shutdown",
+        "Shut down the PC when the game download finishes",
+        "Orion will turn the computer off after Steam finishes downloading.",
+        Run,
+    )
+
+
 def WatchAndShutdown(steam_path: Path, speak=None,
                         check_interval: int = 30, timeout_hours: int = 12):
     print("[GameUpdater]...")
@@ -1003,12 +1030,7 @@ def game_updater(parameters: dict, player=None, speak=None) -> str:
                             steam_path, game_name=game_name, app_id=app_id
                         )
                         if shutdown:
-                            threading.Thread(
-                                target=WatchAndShutdown,
-                                kwargs={"steam_path": steam_path, "speak": speak},
-                                daemon=True
-                            ).start()
-                            msg += " Auto-shutdown enabled."
+                            msg += " " + ArmShutdown(steam_path, speak)
                         if player: player.WriteLog(f"[GameUpdater] {msg[:100]}")
                         if speak:  speak(msg)
                         return msg
@@ -1023,12 +1045,7 @@ def game_updater(parameters: dict, player=None, speak=None) -> str:
                         results.append(f"Steam: {UpdateSteamGames(steam_path)}")
 
                 if shutdown:
-                    threading.Thread(
-                        target=WatchAndShutdown,
-                        kwargs={"steam_path": steam_path, "speak": speak},
-                        daemon=True
-                    ).start()
-                    results.append("Auto-shutdown enabled.")
+                    results.append(ArmShutdown(steam_path, speak))
 
         if platform in ("epic", "both"):
             if IsLinux():

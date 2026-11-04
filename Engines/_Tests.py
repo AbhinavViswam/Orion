@@ -1022,20 +1022,21 @@ def TestPanelSettingsSurvive():
                            "tts": "elevenlabs"})
         ov.RebuildBody()
 
-        import pathlib
+        # Settings saves through AtomicWrite (temp file + replace), so count those.
+        from Brain import Settings as _S
         writes = [0]
-        real = pathlib.Path.write_text
+        real = _S.AtomicWrite
 
-        def Counted(self, *a, **k):
-            if self.name == "ApiKeys.json":
+        def Counted(path, *a, **k):
+            if Path(path).name == "ApiKeys.json":
                 writes[0] += 1
-            return real(self, *a, **k)
+            return real(path, *a, **k)
 
-        pathlib.Path.write_text = Counted
+        _S.AtomicWrite = Counted
         try:
             ov._Apply()
         finally:
-            pathlib.Path.write_text = real
+            _S.AtomicWrite = real
 
         check("APPLY writes the config once", writes[0] == 1, str(writes[0]))
         check("the mode was stored", GetProviderMode() == "pipeline",

@@ -21,6 +21,7 @@ import re
 import json
 import shutil
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 from datetime import datetime
@@ -466,7 +467,7 @@ def ProcessCode(path: Path, action: str, params: dict, speak=None) -> str:
         if ext == "py":
             try:
                 result = subprocess.run(
-                    ["python", str(path)],
+                    [sys.executable, str(path)],
                     capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30
                 )
                 out = result.stdout or result.stderr
@@ -590,6 +591,15 @@ def ProcessVideo(path: Path, action: str, params: dict, speak=None) -> str:
     action = action or "info"
 
 
+    def RunFfmpeg(cmd: list, timeout: int) -> str:
+        """'' when ffmpeg succeeded, else a short reason (it fails quietly otherwise)."""
+        r = subprocess.run(cmd, capture_output=True, text=True,
+                           encoding="utf-8", errors="replace", timeout=timeout)
+        if r.returncode == 0:
+            return ""
+        tail = (r.stderr or "").strip().splitlines()[-1:] or ["unknown error"]
+        return f"ffmpeg failed: {tail[0][:200]}"
+
     def FfmpegAvailable() -> bool:
         try:
             subprocess.run(["ffmpeg", "-version"], capture_output=True, timeout=3)
@@ -623,10 +633,10 @@ def ProcessVideo(path: Path, action: str, params: dict, speak=None) -> str:
             return "ffmpeg not found. Install ffmpeg to extract audio."
         out = OutputPath(path, "audio", ".mp3")
         try:
-            subprocess.run(
-                ["ffmpeg", "-i", str(path), "-q:a", "0", "-map", "a", str(out), "-y"],
-                capture_output=True, timeout=300
-            )
+            err = RunFfmpeg(
+                ["ffmpeg", "-i", str(path), "-q:a", "0", "-map", "a", str(out), "-y"], 300)
+            if err:
+                return f"Extract audio failed. {err}"
             return f"Audio extracted. Saved: {out.name}"
         except Exception as e:
             return f"Extract audio failed: {e}"
@@ -642,7 +652,9 @@ def ProcessVideo(path: Path, action: str, params: dict, speak=None) -> str:
             if end:
                 cmd += ["-to", str(end)]
             cmd += ["-c", "copy", str(out), "-y"]
-            subprocess.run(cmd, capture_output=True, timeout=600)
+            err = RunFfmpeg(cmd, 600)
+            if err:
+                return f"Trim failed. {err}"
             return f"Trimmed video saved: {out.name}"
         except Exception as e:
             return f"Trim failed: {e}"
@@ -653,11 +665,11 @@ def ProcessVideo(path: Path, action: str, params: dict, speak=None) -> str:
             return "ffmpeg not found."
         out = OutputPath(path, f"frame_{timestamp.replace(':', '')}", ".jpg")
         try:
-            subprocess.run(
+            err = RunFfmpeg(
                 ["ffmpeg", "-i", str(path), "-ss", timestamp,
-                 "-vframes", "1", str(out), "-y"],
-                capture_output=True, timeout=30
-            )
+                 "-vframes", "1", str(out), "-y"], 30)
+            if err:
+                return f"Extract frame failed. {err}"
             return f"Frame extracted at {timestamp}. Saved: {out.name}"
         except Exception as e:
             return f"Extract frame failed: {e}"
@@ -668,13 +680,13 @@ def ProcessVideo(path: Path, action: str, params: dict, speak=None) -> str:
             return "ffmpeg not found."
         out = OutputPath(path, f"compressed_crf{crf}", ".mp4")
         try:
-            subprocess.run(
+            err = RunFfmpeg(
                 ["ffmpeg", "-i", str(path),
                  "-c:v", "libx264", "-crf", str(crf),
                  "-preset", "medium", "-c:a", "copy",
-                 str(out), "-y"],
-                capture_output=True, timeout=1800
-            )
+                 str(out), "-y"], 1800)
+            if err:
+                return f"Compress failed. {err}"
             before = FileSizeStr(path)
             after  = FileSizeStr(out)
             return f"Compressed: {before} → {after}. Saved: {out.name}"
@@ -686,11 +698,11 @@ def ProcessVideo(path: Path, action: str, params: dict, speak=None) -> str:
             return "ffmpeg not found. Needed for video transcription."
         tmp_audio = Path(tempfile.mktemp(suffix=".mp3"))
         try:
-            subprocess.run(
+            err = RunFfmpeg(
                 ["ffmpeg", "-i", str(path), "-q:a", "0", "-map", "a",
-                 str(tmp_audio), "-y"],
-                capture_output=True, timeout=300
-            )
+                 str(tmp_audio), "-y"], 300)
+            if err:
+                return f"Video transcription failed. {err}"
             result = ProcessAudio(tmp_audio, "transcribe", params, speak)
             return result
         except Exception as e:
@@ -705,10 +717,9 @@ def ProcessVideo(path: Path, action: str, params: dict, speak=None) -> str:
             return "ffmpeg not found."
         out = OutputPath(path, "converted", f".{fmt}")
         try:
-            subprocess.run(
-                ["ffmpeg", "-i", str(path), str(out), "-y"],
-                capture_output=True, timeout=1800
-            )
+            err = RunFfmpeg(["ffmpeg", "-i", str(path), str(out), "-y"], 1800)
+            if err:
+                return f"Convert failed. {err}"
             return f"Converted to {fmt.upper()}. Saved: {out.name}"
         except Exception as e:
             return f"Convert failed: {e}"
