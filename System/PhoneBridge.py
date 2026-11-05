@@ -285,7 +285,7 @@ class Bridge:
         """Link's status: how many phones are paired, and whether JARVIS is running on one now."""
         data = Sealed("status").get("data") or {}
         self.phones = int(data.get("phones", 0) or 0)
-        listening = data.get("phone_listening")
+        listening = data.get("jarvis_running", data.get("phone_listening"))
         self.jarvis_on = bool(listening) if listening is not None else None
         self._status_at = time.time()
 

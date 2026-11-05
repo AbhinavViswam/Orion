@@ -5502,14 +5502,17 @@ class MainWindow(QMainWindow):
         lay.addWidget(gauges)
         lay.addSpacing(22)
 
-        # JARVIS Link (phone): a small dot, shown only once Orion has been paired with Link.
+        # JARVIS on the phone: "● JARVIS", shown only while JARVIS is running there (the phone's own chip
+        # shows "● ORION" the same way). Nothing at all otherwise.
         self._link_dot = _ClickArea()
-        self._link_dot.setFixedSize(22, 22)
+        self._link_dot.setFixedHeight(22)
         self._link_dot.clicked.connect(lambda: self.OpenSettings("plugins"))
         dl = QHBoxLayout(self._link_dot)
         dl.setContentsMargins(0, 0, 0, 0)
-        self._link_dot_lbl = QLabel("●")
-        self._link_dot_lbl.setFont(QFont(UI_FONT, 9))
+        self._link_dot_lbl = QLabel("●  JARVIS")
+        lf = QFont(UI_FONT, 7, QFont.Weight.DemiBold)
+        lf.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, 1)
+        self._link_dot_lbl.setFont(lf)
         self._link_dot_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         dl.addWidget(self._link_dot_lbl)
         self._link_dot.hide()
@@ -5601,14 +5604,13 @@ class MainWindow(QMainWindow):
         if state == self._link_dot_state:
             return
         self._link_dot_state = state
-        dot.setVisible(state is not None)
-        # Green: JARVIS running on the phone. Grey: Link connected, JARVIS not. Dim: Link not reachable.
-        colour = {"jarvis": C.GREEN, "link": C.TEXT_MED}.get(state, C.TEXT_DIM)
-        self._link_dot_lbl.setStyleSheet(f"color: {colour}; background: transparent;")
-        dot.setToolTip({
-            "jarvis": "JARVIS on the phone: running",
-            "link": "JARVIS Link connected · JARVIS on the phone: not running (or the phone can't reach this PC)",
-        }.get(state, "JARVIS Link (phone): not connected — click for settings"))
+        running = state == "jarvis"
+        dot.setVisible(running)
+        if running:
+            # Colours read now, so a theme or accent change since startup is used.
+            self._link_dot_lbl.setStyleSheet(f"color: {C.GREEN}; background: transparent; border: 1px solid {C.GREEN_D};"
+                                             f" border-radius: 9px; padding: 2px 8px;")
+            dot.setToolTip("JARVIS on the phone: running — click for settings")
 
     def BuildRightPanel(self) -> QWidget:
         """The full conversation and the file drop, in a drawer that slides in
