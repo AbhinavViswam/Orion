@@ -274,10 +274,12 @@ class TestPhoneRules(unittest.TestCase):
     def TestMatches(self):
         cases = {"where is my phone": "where", "where did I leave my phone": "where", "find my phone": "where",
                  "ring my phone": "ring", "my phone battery": "battery", "battery on my phone": "battery",
-                 "how much battery does my phone have": "battery"}
+                 "how much battery does my phone have": "battery",
+                 "where's my phone, I can't find it": "where"}
         for said, action in cases.items():
             self.assertEqual(LocalBrain.PhoneRule(said), {"action": action}, said)
-        for said in ("what is my laptop battery at", "open spotify", "", "call mom"):
+        for said in ("what is my laptop battery at", "open spotify", "", "call mom",
+                     "don't ring my phone, I found it", "do not ring my phone", "never ring my phone at night"):
             self.assertIsNone(LocalBrain.PhoneRule(said), said)
 
     def TestReplies(self):

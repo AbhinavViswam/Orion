@@ -474,8 +474,15 @@ _PHONE_RULES = (
 )
 
 
+# "Don't ring my phone, I found it": told NOT to, so no rule. Narrow on purpose: "where's my phone, I can't
+# find it" is still a plain ask.
+_PHONE_NOT = re.compile(r"\b(don'?t|do not|never|no need to)\b", re.I)
+
+
 def PhoneRule(text: str) -> Optional[dict]:
     """ask_phone's arguments when `text` is one of the plain phone asks above, else None."""
+    if text and _PHONE_NOT.search(text.replace("’", "'")):
+        return None
     for pattern, action in _PHONE_RULES:
         if text and pattern.search(text):
             return {"action": action}
@@ -510,6 +517,7 @@ def Prompt(name: str, creator: str, user_name: str, memory: dict | None, now: da
         "in the user's language. Answer questions from your own knowledge.",
         "Use a tool only when the user asks you to do something. If none of your tools can do it, "
         f'say exactly: "{LIMITED}"',
+        "If the user tells you NOT to do something (don't, do not, never), use no tool: just say okay.",
         who,
     ]
     facts = _NewestFacts(memory, 6)
